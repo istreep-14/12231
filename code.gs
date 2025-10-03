@@ -478,6 +478,14 @@ function fetchAllGamesInitial() {
       }
       props.setProperty('LAST_GAME_URL', mostRecentGame.url);
       props.setProperty('INITIAL_FETCH_COMPLETE', 'true');
+      // Mark previous month as finalized, since initial fetch pulled all archives
+      const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const prevYear = prevMonthDate.getFullYear();
+      const prevMonth = String(prevMonthDate.getMonth() + 1).padStart(2, '0');
+      const prevYearMonth = `${prevYear}_${prevMonth}`;
+      if (prevYearMonth !== currentYearMonth) {
+        props.setProperty('LAST_FINALIZED_MONTH', prevYearMonth);
+      }
       
       ss.toast(`✅ Fetched ${newGames.length} games!`, '✅', 5);
       
@@ -536,12 +544,17 @@ function fetchChesscomGames() {
     const prevMonth = String(prevMonthDate.getMonth() + 1).padStart(2, '0');
     const prevYearMonth = `${prevYear}_${prevMonth}`;
     const lastFinalizedMonth = props.getProperty('LAST_FINALIZED_MONTH') || '';
-    
+
     // If previous month hasn't been finalized and it's not current month, fetch it
     if (lastFinalizedMonth !== prevYearMonth && prevYearMonth !== currentYearMonth) {
-      const prevArchiveUrl = `https://api.chess.com/pub/player/${username}/games/${prevYear}/${prevMonth}`;
-      archivesToCheck.push({url: prevArchiveUrl, key: prevYearMonth, isCurrent: false});
-      ss.toast('Finalizing previous month...', '⏳', -1);
+      // If Games sheet already contains any row from the previous month, consider it finalized
+      if (isMonthPresentInGamesSheet(prevYear, parseInt(prevMonth, 10))) {
+        props.setProperty('LAST_FINALIZED_MONTH', prevYearMonth);
+      } else {
+        const prevArchiveUrl = `https://api.chess.com/pub/player/${username}/games/${prevYear}/${prevMonth}`;
+        archivesToCheck.push({url: prevArchiveUrl, key: prevYearMonth, isCurrent: false});
+        ss.toast('Finalizing previous month...', '⏳', -1);
+      }
     }
     
     // Always check current month
@@ -568,23 +581,32 @@ function fetchChesscomGames() {
         props.setProperty('LAST_FINALIZED_MONTH', archive.key);
       }
       
-      const gamesData = response.data.games;
+      const gamesData = (response.data && response.data.games) ? response.data.games : [];
       
       if (lastKnownGameUrl) {
-        // Iterate from end to start (newest to oldest)
-        for (let i = gamesData.length - 1; i >= 0; i--) {
+        // Add only games strictly newer than lastKnownGameUrl
+        let encounteredLast = false;
+        for (let i = 0; i < gamesData.length; i++) {
           const game = gamesData[i];
-          
           if (game.url === lastKnownGameUrl) {
+            encounteredLast = true;
             foundLastKnownGame = true;
             break;
           }
-          
-          allGames.unshift(game); // Add to front to maintain order
         }
-        
-        if (foundLastKnownGame) break;
+        if (!encounteredLast) {
+          // Whole archive is newer; append all
+          allGames.push(...gamesData);
+        } else {
+          // Collect only newer ones (after lastKnown)
+          for (let i = gamesData.length - 1; i >= 0; i--) {
+            const game = gamesData[i];
+            if (game.url === lastKnownGameUrl) break;
+            allGames.unshift(game);
+          }
+        }
       } else {
+        // No last known; but to avoid refetching entire previous month, rely on ETag check + duplicate filter.
         allGames.push(...gamesData);
       }
     }
@@ -595,17 +617,30 @@ function fetchChesscomGames() {
     }
     
     // Filter out duplicates before processing
+    // Also skip any game older than or equal to last known by end_time if URL unknown
     const existingGameIds = new Set();
+    let lastKnownEndTime = 0;
     if (gamesSheet.getLastRow() > 1) {
       const existingData = gamesSheet.getDataRange().getValues();
       for (let i = 1; i < existingData.length; i++) {
         existingGameIds.add(existingData[i][11]); // Game ID column (index 11)
+        const endDate = existingData[i][1];
+        const endTime = existingData[i][2];
+        if (endDate instanceof Date && endTime instanceof Date) {
+          const ts = new Date(
+            endDate.getFullYear(), endDate.getMonth(), endDate.getDate(),
+            endTime.getHours(), endTime.getMinutes(), endTime.getSeconds()
+          ).getTime() / 1000;
+          if (ts > lastKnownEndTime) lastKnownEndTime = ts;
+        }
       }
     }
-    
+
     const newGames = allGames.filter(game => {
       const gameId = game.url.split('/').pop();
-      return !existingGameIds.has(gameId);
+      if (existingGameIds.has(gameId)) return false;
+      if (lastKnownEndTime && game.end_time && game.end_time <= lastKnownEndTime) return false;
+      return true;
     });
     
     if (newGames.length === 0) {
@@ -620,7 +655,7 @@ function fetchChesscomGames() {
       const lastRow = gamesSheet.getLastRow();
       gamesSheet.getRange(lastRow + 1, 1, rows.length, rows[0].length).setValues(rows);
       
-      // Find the most recent game from the new games fetched
+      // Update last known game URL to the newest by end_time among all new and existing
       let mostRecentGame = newGames[0];
       for (const game of newGames) {
         if (game.end_time > mostRecentGame.end_time) {
@@ -748,10 +783,18 @@ function processGamesData(games, username) {
     for (let i = 1; i < data.length; i++) {
       try {
         const format = data[i][7]; // Format column (index 7)
-        const endDate = data[i][1]; // End Date column
-        const endTime = data[i][2]; // End Time column
+        const endDate = data[i][1]; // End Date (Date object)
+        const endTime = data[i][2]; // End Time (Date object)
         const myRating = data[i][8]; // My Rating column (index 8)
-        const timestamp = new Date(endDate + ' ' + endTime).getTime() / 1000;
+        let timestamp = 0;
+        if (endDate instanceof Date && endTime instanceof Date) {
+          timestamp = new Date(
+            endDate.getFullYear(), endDate.getMonth(), endDate.getDate(),
+            endTime.getHours(), endTime.getMinutes(), endTime.getSeconds()
+          ).getTime() / 1000;
+        } else if (endDate instanceof Date) {
+          timestamp = Math.floor(endDate.getTime() / 1000);
+        }
         
         existingGames.push({
           format: format,
@@ -791,16 +834,16 @@ function processGamesData(games, username) {
       const oppRating = isWhite ? game.black?.rating : game.white?.rating;
       
       // Calculate Last Rating from pre-loaded data AND games processed in this batch
+      // Use end_time comparison; fall back to earlier same-second using <=
       let lastRating = null;
       let lastGameTime = 0;
-      
-      // Check existing games from sheet
       for (const existingGame of existingGames) {
-        if (existingGame.format === format && 
-            existingGame.timestamp < game.end_time && 
-            existingGame.timestamp > lastGameTime) {
-          lastGameTime = existingGame.timestamp;
-          lastRating = existingGame.rating;
+        if (existingGame.format === format) {
+          const isEarlier = existingGame.timestamp < game.end_time || (existingGame.timestamp === game.end_time);
+          if (isEarlier && existingGame.timestamp >= lastGameTime && existingGame.rating && existingGame.rating !== 'N/A') {
+            lastGameTime = existingGame.timestamp;
+            lastRating = existingGame.rating;
+          }
         }
       }
       
