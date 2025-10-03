@@ -2,7 +2,7 @@
 // CONFIGURATION
 // ============================================
 const CONFIG = {
-  USERNAME: 'ians141',
+  USERNAME: 'frankscobey',
   MAX_GAMES_PER_BATCH: 3,
   AUTO_FETCH_CALLBACK_DATA: true // Automatically fetch callback data for new games
 };
@@ -11,7 +11,6 @@ const SHEETS = {
   GAMES: 'Games',
   ANALYSIS: 'Analysis',
   CALLBACK: 'Callback',
-  RATINGS_TIMELINE: 'Ratings Timeline',
   DERIVED: 'Derived Data'
 };
 
@@ -359,10 +358,6 @@ function fetchCallbackForGames(gamesToFetch) {
   
   ss.toast(`✅ Callback fetched: ${successCount}, Errors: ${errorCount}`, '📋', 5);
   
-  // Update ratings timeline for affected dates
-  if (successCount > 0) {
-    updateTimelineForGames(gamesToFetch);
-  }
 }
 
 function findGameRow(gameId) {
@@ -470,8 +465,6 @@ function fetchAllGamesInitial() {
       
       ss.toast(`✅ Fetched ${newGames.length} games!`, '✅', 5);
       
-      // Don't auto-process on initial fetch (too many games)
-      // User can manually run "Build Ratings Timeline" and analyze games after
     }
     
   } catch (error) {
@@ -639,8 +632,6 @@ function fetchChesscomGames() {
       
       processNewGamesAutoFeatures(gamesToProcess);
       
-      // Update ratings timeline
-      updateRatingsTimeline();
     }
     
   } catch (error) {
@@ -835,31 +826,32 @@ function processGamesData(games, username) {
       
       // Store derived data in hidden sheet
       derivedRows.push([
-        gameId,
-        game.white?.username || 'Unknown',
-        game.black?.username || 'Unknown',
-        game.white?.rating || 'N/A',
-        game.black?.rating || 'N/A',
-        timeClass,
-        game.time_control || '',
-        tcParsed.type,
-        tcParsed.baseTime,
-        tcParsed.increment,
-        tcParsed.correspondenceTime,
-        eco,
-        ecoUrl,
-        game.rated !== undefined ? game.rated : true,
-        endDateTime,
-        startDateTime,
-        startDateObj,
-        startTimeObj,
-        duration,
-        moveData.plyCount,
-        movesCount,
-        moveData.moveList,
-        moveData.clocks,
-        moveData.times
-      ]);
+  gameId,
+  game.white?.username || 'Unknown',
+  game.black?.username || 'Unknown',
+  game.white?.rating || 'N/A',
+  game.black?.rating || 'N/A',
+  timeClass,
+  game.time_control || '',
+  tcParsed.type,
+  tcParsed.baseTime,
+  tcParsed.increment,
+  tcParsed.correspondenceTime,
+  eco,
+  ecoUrl,
+  extractECOSlug(ecoUrl), // NEW: ECO Slug column
+  game.rated !== undefined ? game.rated : true,
+  endDateTime,
+  startDateTime,
+  startDateObj,
+  startTimeObj,
+  duration,
+  moveData.plyCount,
+  movesCount,
+  moveData.moveList,
+  moveData.clocks,
+  moveData.times
+]);
       
       // Add this game to existingGames for subsequent games in this batch
       existingGames.push({
@@ -980,6 +972,74 @@ function extractECOUrlFromPGN(pgn) {
   if (!pgn) return '';
   const match = pgn.match(/\[ECOUrl "([^"]+)"\]/);
   return match ? match[1] : '';
+}
+
+/**
+ * Extract opening slug from ECO URL
+ * Rules:
+ * 1. Remove base URL (keep only the slug part)
+ * 2. Remove move sequences (patterns like -3...Nf6-4.g3)
+ * 3. Keep "with-X-move" patterns (e.g., with-7-a5)
+ * 4. Keep "with-X-move-and-Y-move" patterns (e.g., with-2-d4-and-3-g3)
+ * 5. Remove anything after move numbers that aren't part of "with" patterns
+ */
+function extractECOSlug(ecoUrl) {
+  if (!ecoUrl || !ecoUrl.includes('chess.com/openings/')) return '';
+  
+  // Extract the slug part after '/openings/'
+  const slug = ecoUrl.split('/openings/')[1] || '';
+  if (!slug) return '';
+  
+  // Strategy: Find the first move sequence that's NOT part of a "with" pattern and trim from there
+  
+  // Pattern 1: with-NUMBER-MOVE-and-NUMBER-MOVE (keep this entire pattern)
+  // Pattern 2: with-NUMBER-MOVE (keep this entire pattern)
+  // Pattern 3: -NUMBER (where NUMBER is followed by . or ... indicating moves) - REMOVE from here onward
+  
+  // First, protect "with" patterns by replacing them temporarily
+  let protected = slug;
+  const withPatterns = [];
+  
+  // Match: with-NUMBER-MOVE-and-NUMBER-MOVE
+  // Move can be: standard notation (Nf3, e4, etc.) or castling (O-O, O-O-O)
+  const withAndPattern = /with-(\d+)-(O-O(?:-O)?|[a-zA-Z0-9]+)-and-(\d+)-(O-O(?:-O)?|[a-zA-Z0-9]+)/g;
+  protected = protected.replace(withAndPattern, (match) => {
+    const placeholder = `__WITH_AND_${withPatterns.length}__`;
+    withPatterns.push(match);
+    return placeholder;
+  });
+  
+  // Match: with-NUMBER-MOVE (but not followed by -and-)
+  // Move can be: standard notation (Nf3, e4, etc.) or castling (O-O, O-O-O)
+  const withPattern = /with-(\d+)-(O-O(?:-O)?|[a-zA-Z0-9]+)(?!-and-)/g;
+  protected = protected.replace(withPattern, (match) => {
+    const placeholder = `__WITH_${withPatterns.length}__`;
+    withPatterns.push(match);
+    return placeholder;
+  });
+  
+  // Now find the first move sequence indicator
+  // Look for patterns like: -3...Nf6 or -4.g3 or -7...g6 or ...8.Nf3 or ...5.cxd4 or ...e6
+  // These indicate the start of move notation
+  // Pattern matches: 
+  //   -NUMBER. or -NUMBER... (dash followed by move number)
+  //   ...NUMBER. (three dots followed by move number)
+  //   ...[a-zA-Z] (three dots followed by move notation without number)
+  const movePattern = /(-\d+\.{0,3}[a-zA-Z]|\.{3}\d+\.|\.{3}[a-zA-Z])/;
+  const moveMatch = protected.match(movePattern);
+  
+  if (moveMatch) {
+    // Trim from the first move sequence
+    protected = protected.substring(0, moveMatch.index);
+  }
+  
+  // Restore "with" patterns
+  for (let i = 0; i < withPatterns.length; i++) {
+    protected = protected.replace(`__WITH_AND_${i}__`, withPatterns[i]);
+    protected = protected.replace(`__WITH_${i}__`, withPatterns[i]);
+  }
+  
+  return protected;
 }
 
 // Extract moves with clock times from PGN
@@ -1139,7 +1199,6 @@ function setupSheets() {
     // Format date and time columns
     gamesSheet.getRange('B:B').setNumberFormat('m"/"d"/"yy');
     gamesSheet.getRange('C:C').setNumberFormat('h:mm AM/PM');
-    
   }
   
   let derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
@@ -1148,7 +1207,7 @@ function setupSheets() {
     const headers = [
       'Game ID', 'White Username', 'Black Username', 'White Rating', 'Black Rating',
       'Time Class', 'Time Control', 'Type', 'Base Time', 'Increment', 'Correspondence Time',
-      'ECO', 'ECO URL', 'Rated',
+      'ECO', 'ECO URL', 'ECO Slug', 'Rated',
       'End', 'Start', 'Start Date', 'Start Time', 'Duration (s)', 'Ply Count', 'Moves',
       'Move List', 'Move Clocks', 'Move Times'
     ];
@@ -1160,19 +1219,31 @@ function setupSheets() {
     derivedSheet.setFrozenRows(1);
     
     // Format date/time columns
-    derivedSheet.getRange('O:O').setNumberFormat('m"/"d"/"yy h:mm AM/PM'); // End
-    derivedSheet.getRange('P:P').setNumberFormat('m"/"d"/"yy h:mm AM/PM'); // Start
-    derivedSheet.getRange('Q:Q').setNumberFormat('m"/"d"/"yy'); // Start Date
-    derivedSheet.getRange('R:R').setNumberFormat('h:mm AM/PM'); // Start Time
+    derivedSheet.getRange('P:P').setNumberFormat('m"/"d"/"yy h:mm AM/PM'); // End
+    derivedSheet.getRange('Q:Q').setNumberFormat('m"/"d"/"yy h:mm AM/PM'); // Start
+    derivedSheet.getRange('R:R').setNumberFormat('m"/"d"/"yy'); // Start Date
+    derivedSheet.getRange('S:S').setNumberFormat('h:mm AM/PM'); // Start Time
     
-    // Format Move Clocks and Move Times columns as text to prevent scientific notation
-    derivedSheet.getRange('V:V').setNumberFormat('@STRING@'); // Move List
-    derivedSheet.getRange('W:W').setNumberFormat('@STRING@'); // Move Clocks
-    derivedSheet.getRange('X:X').setNumberFormat('@STRING@'); // Move Times
+    // Format Move Clocks and Move Times columns as text
+    derivedSheet.getRange('W:W').setNumberFormat('@STRING@'); // Move List
+    derivedSheet.getRange('X:X').setNumberFormat('@STRING@'); // Move Clocks
+    derivedSheet.getRange('Y:Y').setNumberFormat('@STRING@'); // Move Times
     
     // Hide the derived sheet
     derivedSheet.hideSheet();
+  } else {
+    // If sheet exists, add ECO Slug column if not present
+    const headers = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
+    if (!headers.includes('ECO Slug')) {
+      // Insert new column after ECO URL (column 13)
+      derivedSheet.insertColumnAfter(13);
+      derivedSheet.getRange(1, 14).setValue('ECO Slug')
+        .setFontWeight('bold')
+        .setBackground('#666666')
+        .setFontColor('#ffffff');
+    }
   }
+
   
   // Apply formatting to existing Games sheet if it exists
   if (gamesSheet) {
@@ -1180,7 +1251,7 @@ function setupSheets() {
     gamesSheet.getRange('C:C').setNumberFormat('h:mm AM/PM');
   }
   
-  let callbackSheet = ss.getSheetByName(SHEETS.CALLBACK);
+   let callbackSheet = ss.getSheetByName(SHEETS.CALLBACK);
   if (!callbackSheet) {
     callbackSheet = ss.insertSheet(SHEETS.CALLBACK);
     const headers = [
@@ -1201,10 +1272,8 @@ function setupSheets() {
       .setFontColor('#ffffff');
     callbackSheet.setFrozenRows(1);
     
-    // Format Move Timestamps column as text to prevent scientific notation
     callbackSheet.getRange('K:K').setNumberFormat('@STRING@');
   }
-  
   
   SpreadsheetApp.getUi().alert('✅ Sheets setup complete!');
 }
