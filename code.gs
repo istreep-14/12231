@@ -11,7 +11,8 @@ const SHEETS = {
   GAMES: 'Games',
   ANALYSIS: 'Analysis',
   CALLBACK: 'Callback',
-  DERIVED: 'Derived Data'
+  DERIVED: 'Derived Data',
+  OPENINGS_DB: 'Openings DB' // TSV-backed openings database (Name, Trim Slug, Family, Name, Variation1..6)
 };
 
 // Result to outcome mapping
@@ -52,6 +53,20 @@ const TERMINATION_MAP = {
   'bughousepartnerlose': 'Bughouse partner lost'
 };
 
+// Cache for openings database (sheet-backed)
+let OPENINGS_DB_CACHE = null;
+const OPENINGS_DB_HEADERS = [
+  'Name', 'Trim Slug', 'Family', 'Name',
+  'Variation 1', 'Variation 2', 'Variation 3', 'Variation 4', 'Variation 5', 'Variation 6'
+];
+
+// Columns to add to Derived Data for DB mapping
+const DERIVED_DB_HEADERS = [
+  'DB Full Name', 'DB Family', 'DB Base Name',
+  'DB Variation 1', 'DB Variation 2', 'DB Variation 3',
+  'DB Variation 4', 'DB Variation 5', 'DB Variation 6'
+];
+
 // ============================================
 // MAIN MENU
 // ============================================
@@ -63,6 +78,7 @@ function onOpen() {
     .addItem('3️⃣ Update Recent Games', 'fetchChesscomGames')
     .addSeparator()
     .addItem('📋 Fetch Callback Last 10', 'fetchCallbackLast10')
+    .addItem('🔗 Refresh Opening Mappings', 'refreshDerivedDbMappings')
     .addToUi();
 }
 
@@ -760,6 +776,7 @@ function processGamesData(games, username) {
       const gameId = game.url.split('/').pop();
       const eco = extractECOFromPGN(game.pgn);
       const ecoUrl = extractECOUrlFromPGN(game.pgn);
+      const ecoSlug = extractECOSlug(ecoUrl);
       const outcome = getGameOutcome(game, username);
       const termination = getGameTermination(game, username);
       const format = getGameFormat(game);
@@ -825,33 +842,36 @@ function processGamesData(games, username) {
       const movesCount = moveData.plyCount > 0 ? Math.ceil(moveData.plyCount / 2) : 0;
       
       // Store derived data in hidden sheet
+      const dbValues = getDbMappingValues(ecoSlug);
+
       derivedRows.push([
-  gameId,
-  game.white?.username || 'Unknown',
-  game.black?.username || 'Unknown',
-  game.white?.rating || 'N/A',
-  game.black?.rating || 'N/A',
-  timeClass,
-  game.time_control || '',
-  tcParsed.type,
-  tcParsed.baseTime,
-  tcParsed.increment,
-  tcParsed.correspondenceTime,
-  eco,
-  ecoUrl,
-  extractECOSlug(ecoUrl), // NEW: ECO Slug column
-  game.rated !== undefined ? game.rated : true,
-  endDateTime,
-  startDateTime,
-  startDateObj,
-  startTimeObj,
-  duration,
-  moveData.plyCount,
-  movesCount,
-  moveData.moveList,
-  moveData.clocks,
-  moveData.times
-]);
+        gameId,
+        game.white?.username || 'Unknown',
+        game.black?.username || 'Unknown',
+        game.white?.rating || 'N/A',
+        game.black?.rating || 'N/A',
+        timeClass,
+        game.time_control || '',
+        tcParsed.type,
+        tcParsed.baseTime,
+        tcParsed.increment,
+        tcParsed.correspondenceTime,
+        eco,
+        ecoUrl,
+        ecoSlug,
+        game.rated !== undefined ? game.rated : true,
+        endDateTime,
+        startDateTime,
+        startDateObj,
+        startTimeObj,
+        duration,
+        moveData.plyCount,
+        movesCount,
+        moveData.moveList,
+        moveData.clocks,
+        moveData.times,
+        ...dbValues
+      ]);
       
       // Add this game to existingGames for subsequent games in this batch
       existingGames.push({
@@ -868,11 +888,30 @@ function processGamesData(games, username) {
   
   // Write derived data to hidden sheet
   if (derivedSheet && derivedRows.length > 0) {
+    // Ensure DB columns exist before writing, to match value count
+    ensureDerivedDbColumns(derivedSheet);
     const lastRow = derivedSheet.getLastRow();
     derivedSheet.getRange(lastRow + 1, 1, derivedRows.length, derivedRows[0].length).setValues(derivedRows);
   }
   
   return rows;
+}
+
+function ensureDerivedDbColumns(derivedSheet) {
+  if (!derivedSheet) return;
+  const lastCol = derivedSheet.getLastColumn();
+  const headers = derivedSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  for (const header of DERIVED_DB_HEADERS) {
+    const idx = headers.indexOf(header);
+    if (idx === -1) {
+      derivedSheet.insertColumnAfter(derivedSheet.getLastColumn());
+      const col = derivedSheet.getLastColumn();
+      derivedSheet.getRange(1, col).setValue(header)
+        .setFontWeight('bold')
+        .setBackground('#666666')
+        .setFontColor('#ffffff');
+    }
+  }
 }
 
 // Get game format based on rules and time control
@@ -1042,6 +1081,88 @@ function extractECOSlug(ecoUrl) {
   return protected;
 }
 
+// ================================
+// OPENINGS DB LOOKUP (by ECO Slug)
+// ================================
+
+function loadOpeningsDbCache() {
+  if (OPENINGS_DB_CACHE) return OPENINGS_DB_CACHE;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const dbSheet = ss.getSheetByName(SHEETS.OPENINGS_DB);
+  const cache = new Map();
+  if (!dbSheet) {
+    OPENINGS_DB_CACHE = cache;
+    return cache;
+  }
+  const values = dbSheet.getDataRange().getValues();
+  if (!values || values.length < 2) {
+    OPENINGS_DB_CACHE = cache;
+    return cache;
+  }
+  const header = values[0];
+  const slugIdx = header.indexOf('Trim Slug');
+  const familyIdx = header.indexOf('Family');
+  // The TSV has two 'Name' headers. We'll treat the first as Full Name and the second as Base Name.
+  // Positions per OPENINGS_DB_HEADERS:
+  // 0: Name (Full), 1: Trim Slug, 2: Family, 3: Name (Base), 4..9: Variation 1..6
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const trimSlug = String(row[1] || '').trim();
+    if (!trimSlug) continue;
+    const fullName = String(row[0] || '');
+    const baseName = String(row[3] || '');
+    const family = String(row[2] || '');
+    const v1 = String(row[4] || '');
+    const v2 = String(row[5] || '');
+    const v3 = String(row[6] || '');
+    const v4 = String(row[7] || '');
+    const v5 = String(row[8] || '');
+    const v6 = String(row[9] || '');
+    cache.set(trimSlug, [fullName, family, baseName, v1, v2, v3, v4, v5, v6]);
+  }
+  OPENINGS_DB_CACHE = cache;
+  return cache;
+}
+
+function normalizeSlugForDb(ecoSlug) {
+  if (!ecoSlug) return '';
+  // The DB uses Title-Case with hyphens; ecoSlug looks similar but may include lowercase and numbers like with-3-Nc3
+  // We'll convert to Title-Case tokens separated by '-' and ensure castling tokens are normalized.
+  const tokens = ecoSlug
+    .replace(/_/g, '-')
+    .split('-')
+    .filter(Boolean)
+    .map(tok => {
+      if (/^with$/i.test(tok) || /^and$/i.test(tok)) return tok.charAt(0).toUpperCase() + tok.slice(1).toLowerCase();
+      if (/^o$/i.test(tok)) return 'O';
+      if (/^o\so$/i.test(tok)) return 'O-O';
+      // Preserve chess move tokens/case like Nf3, e4, O-O, but capitalize words
+      if (/^[a-z][a-z]+$/i.test(tok)) {
+        return tok.charAt(0).toUpperCase() + tok.slice(1);
+      }
+      return tok;
+    });
+  return tokens.join('-');
+}
+
+function getDbMappingValues(ecoSlug) {
+  // Returns array matching DERIVED_DB_HEADERS order
+  const empty = ['', '', '', '', '', '', '', '', ''];
+  if (!ecoSlug) return empty;
+  const db = loadOpeningsDbCache();
+  // Try direct match first
+  if (db.has(ecoSlug)) return db.get(ecoSlug);
+  // Try normalized form
+  const normalized = normalizeSlugForDb(ecoSlug);
+  if (db.has(normalized)) return db.get(normalized);
+  // Try loosening: drop trailing move qualifiers like 'with-3-Nc3' if not found
+  const withoutWith = ecoSlug.split('-with-')[0];
+  if (withoutWith && db.has(withoutWith)) return db.get(withoutWith);
+  const normalizedWithoutWith = normalized.split('-with-')[0];
+  if (normalizedWithoutWith && db.has(normalizedWithoutWith)) return db.get(normalizedWithoutWith);
+  return empty;
+}
+
 // Extract moves with clock times from PGN
 function extractMovesWithClocks(pgn, baseTime, increment) {
   if (!pgn) return { moves: [], clocks: [], times: [] };
@@ -1209,7 +1330,8 @@ function setupSheets() {
       'Time Class', 'Time Control', 'Type', 'Base Time', 'Increment', 'Correspondence Time',
       'ECO', 'ECO URL', 'ECO Slug', 'Rated',
       'End', 'Start', 'Start Date', 'Start Time', 'Duration (s)', 'Ply Count', 'Moves',
-      'Move List', 'Move Clocks', 'Move Times'
+      'Move List', 'Move Clocks', 'Move Times',
+      ...DERIVED_DB_HEADERS
     ];
     derivedSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
     derivedSheet.getRange(1, 1, 1, headers.length)
@@ -1225,9 +1347,13 @@ function setupSheets() {
     derivedSheet.getRange('S:S').setNumberFormat('h:mm AM/PM'); // Start Time
     
     // Format Move Clocks and Move Times columns as text
-    derivedSheet.getRange('W:W').setNumberFormat('@STRING@'); // Move List
-    derivedSheet.getRange('X:X').setNumberFormat('@STRING@'); // Move Clocks
-    derivedSheet.getRange('Y:Y').setNumberFormat('@STRING@'); // Move Times
+    // Note: these column letters assume no extra columns before them.
+    const moveListCol = 23; // W
+    const moveClocksCol = 24; // X
+    const moveTimesCol = 25; // Y
+    derivedSheet.getRange(1, moveListCol, derivedSheet.getMaxRows(), 1).setNumberFormat('@STRING@');
+    derivedSheet.getRange(1, moveClocksCol, derivedSheet.getMaxRows(), 1).setNumberFormat('@STRING@');
+    derivedSheet.getRange(1, moveTimesCol, derivedSheet.getMaxRows(), 1).setNumberFormat('@STRING@');
     
     // Hide the derived sheet
     derivedSheet.hideSheet();
@@ -1241,6 +1367,20 @@ function setupSheets() {
         .setFontWeight('bold')
         .setBackground('#666666')
         .setFontColor('#ffffff');
+    }
+
+    // Ensure DB mapping columns exist (append missing at the end to avoid index shifts)
+    let currentHeaders = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
+    for (const header of DERIVED_DB_HEADERS) {
+      currentHeaders = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
+      if (!currentHeaders.includes(header)) {
+        derivedSheet.insertColumnAfter(derivedSheet.getLastColumn());
+        const col = derivedSheet.getLastColumn();
+        derivedSheet.getRange(1, col).setValue(header)
+          .setFontWeight('bold')
+          .setBackground('#666666')
+          .setFontColor('#ffffff');
+      }
     }
   }
 
@@ -1274,9 +1414,84 @@ function setupSheets() {
     
     callbackSheet.getRange('K:K').setNumberFormat('@STRING@');
   }
+
+  // Ensure Openings DB sheet exists with headers for paste/import
+  let dbSheet = ss.getSheetByName(SHEETS.OPENINGS_DB);
+  if (!dbSheet) {
+    dbSheet = ss.insertSheet(SHEETS.OPENINGS_DB);
+    dbSheet.getRange(1, 1, 1, OPENINGS_DB_HEADERS.length).setValues([OPENINGS_DB_HEADERS]);
+    dbSheet.getRange(1, 1, 1, OPENINGS_DB_HEADERS.length)
+      .setFontWeight('bold')
+      .setBackground('#0b8043')
+      .setFontColor('#ffffff');
+    dbSheet.setFrozenRows(1);
+  }
   
   SpreadsheetApp.getUi().alert('✅ Sheets setup complete!');
 }
 
 
 
+
+// ============================================
+// UTILITIES: Refresh mappings across existing rows
+// ============================================
+function refreshDerivedDbMappings() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
+  if (!derivedSheet) {
+    SpreadsheetApp.getUi().alert('Derived sheet not found');
+    return;
+  }
+  // Ensure cache is loaded fresh
+  OPENINGS_DB_CACHE = null;
+  loadOpeningsDbCache();
+
+  const lastRow = derivedSheet.getLastRow();
+  const lastCol = derivedSheet.getLastColumn();
+  if (lastRow < 2) return;
+
+  const headers = derivedSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  const ecoSlugCol = headers.indexOf('ECO Slug') + 1;
+  if (ecoSlugCol <= 0) {
+    SpreadsheetApp.getUi().alert('ECO Slug column not found');
+    return;
+  }
+
+  // Determine starting column for DB headers, ensuring they exist
+  let startDbCol = -1;
+  for (let i = 0; i < DERIVED_DB_HEADERS.length; i++) {
+    const idx = headers.indexOf(DERIVED_DB_HEADERS[i]);
+    if (idx >= 0) {
+      startDbCol = startDbCol === -1 ? (idx + 1) : Math.min(startDbCol, idx + 1);
+    }
+  }
+  if (startDbCol === -1) {
+    // Append columns if missing
+    let currentHeaders = headers.slice();
+    for (const header of DERIVED_DB_HEADERS) {
+      currentHeaders = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
+      if (!currentHeaders.includes(header)) {
+        derivedSheet.insertColumnAfter(derivedSheet.getLastColumn());
+        const col = derivedSheet.getLastColumn();
+        derivedSheet.getRange(1, col).setValue(header)
+          .setFontWeight('bold')
+          .setBackground('#666666')
+          .setFontColor('#ffffff');
+      }
+    }
+    // Recompute
+    const newHeaders = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
+    startDbCol = newHeaders.indexOf(DERIVED_DB_HEADERS[0]) + 1;
+  }
+
+  const ecoSlugs = derivedSheet.getRange(2, ecoSlugCol, lastRow - 1, 1).getValues().map(r => String(r[0] || ''));
+  const writeRows = [];
+  for (const ecoSlug of ecoSlugs) {
+    const vals = getDbMappingValues(ecoSlug);
+    writeRows.push(vals);
+  }
+
+  derivedSheet.getRange(2, startDbCol, writeRows.length, DERIVED_DB_HEADERS.length).setValues(writeRows);
+  SpreadsheetApp.getUi().alert('✅ Opening mappings refreshed');
+}
