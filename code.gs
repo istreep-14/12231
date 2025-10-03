@@ -1277,3 +1277,6 @@ function setupSheets() {
   
   SpreadsheetApp.getUi().alert('✅ Sheets setup complete!');
 }
+
+
+
