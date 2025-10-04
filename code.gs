@@ -827,10 +827,6 @@ function processGamesData(games, username) {
       const dbValues = getOpeningOutputs(ecoSlug);
       derivedRows.push([
         gameId,
-        game.url,
-        startDateTime,
-        endDateTime,
-        duration || null,
         startDateTime ? Math.floor(startDateTime.getTime() / 1000) : null,
         Math.floor(endDateTime.getTime() / 1000),
         timeClass.toLowerCase() !== 'daily',
@@ -848,7 +844,6 @@ function processGamesData(games, username) {
         dbValues[0], // Opening Name
         dbValues[1], // Opening Family
         moveData.plyCount,
-        movesCount,
         tcn,
         mc36
       ]);
@@ -1289,15 +1284,15 @@ function setupSheets() {
     derivedSheet = ss.insertSheet(SHEETS.DERIVED);
     const headers = [
       // Combined lean schema
-      'Game ID', 'Game URL',
-      'Start', 'End', 'Duration (s)', 'Start (epoch s)', 'End (epoch s)',
+      'Game ID',
+      'Start (epoch s)', 'End (epoch s)',
       'Is Live', 'Time Class', 'Base Time (s)', 'Increment (s)', 'Correspondence Time (s)',
       'Is White', 'Opponent', 'My Rating', 'Opp Rating',
       'Outcome', 'Termination',
       'ECO', 'Opening Name', 'Opening Family',
-      'Ply Count', 'Moves',
+      'Ply Count',
       // Compact detail
-      'tcn', 'mc36'
+      'tcn', 'clocks'
     ];
     derivedSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
     derivedSheet.getRange(1, 1, 1, headers.length)
@@ -1306,11 +1301,7 @@ function setupSheets() {
       .setFontColor('#ffffff');
     derivedSheet.setFrozenRows(1);
     
-    // Format datetime columns
-    const startCol = 3;
-    const endCol = 4;
-    derivedSheet.getRange(1, startCol, derivedSheet.getMaxRows(), 1).setNumberFormat('m"/"d"/"yy h:mm AM/PM');
-    derivedSheet.getRange(1, endCol, derivedSheet.getMaxRows(), 1).setNumberFormat('m"/"d"/"yy h:mm AM/PM');
+    // No formatted datetime columns in combined sheet
     
     // Hide the derived sheet
     derivedSheet.hideSheet();
