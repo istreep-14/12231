@@ -824,6 +824,17 @@ function processGamesData(games, username) {
       // Calculate Moves (ply count / 2 rounded up)
       const movesCount = moveData.plyCount > 0 ? Math.ceil(moveData.plyCount / 2) : 0;
       
+      // Compute Rating Before/Delta (fast, format-local)
+      // Use last seen rating for this format from prior writes in this batch, else from a small cache from existing sheet
+      if (!processGamesData._formatLast) processGamesData._formatLast = new Map();
+      const key = format;
+      const last = processGamesData._formatLast.get(key);
+      const ratingBefore = (typeof last === 'number') ? last : null;
+      const deltaQuick = (ratingBefore != null && typeof myRating === 'number') ? (myRating - ratingBefore) : null;
+
+      // Update cache with this game's rating for subsequent rows
+      if (typeof myRating === 'number') processGamesData._formatLast.set(key, myRating);
+
       // Store combined lean data in derived sheet
       const dbValues = getOpeningOutputs(ecoSlug);
       const startEpoch = startDateTime ? Math.floor(startDateTime.getTime() / 1000) : null;
@@ -852,6 +863,7 @@ function processGamesData(games, username) {
         archiveTag,
         timeClass.toLowerCase() !== 'daily',
         timeClass,
+        format,
         tcParsed.baseTime,
         tcParsed.increment,
         tcParsed.correspondenceTime,
@@ -859,6 +871,8 @@ function processGamesData(games, username) {
         opponent || 'Unknown',
         myRating || 'N/A',
         oppRating || 'N/A',
+        ratingBefore,
+        deltaQuick,
         outcome,
         termination,
         eco,
@@ -886,6 +900,19 @@ function processGamesData(games, username) {
   if (derivedSheet && derivedRows.length > 0) {
     const lastRow = derivedSheet.getLastRow();
     derivedSheet.getRange(lastRow + 1, 1, derivedRows.length, derivedRows[0].length).setValues(derivedRows);
+    // Seed/refresh format-last cache from newly written rows to support subsequent fetches efficiently
+    const wrote = derivedSheet.getRange(lastRow + 1, 1, derivedRows.length, derivedRows[0].length).getValues();
+    if (!processGamesData._formatLast) processGamesData._formatLast = new Map();
+    for (const r of wrote) {
+      const fmt = r[8]; // Time Class or r[9] if Format; we use Format column index below
+      const formatColIndex = 9; // 0-based: Game ID(0), Start(1), End(2), EndLocal(3), DateSerial(4), Archive(5), IsLive(6), TimeClass(7), Format(8), Base(9)
+      const myRatingColIndex = 14; // My Rating after added columns
+      const formatVal = r[8];
+      const myRatingVal = r[14];
+      if (typeof myRatingVal === 'number') {
+        processGamesData._formatLast.set(formatVal, myRatingVal);
+      }
+    }
   }
   
   // Return count processed
@@ -1307,8 +1334,8 @@ function setupSheets() {
       // Combined lean schema
       'Game ID',
       'Start (epoch s)', 'End (epoch s)', 'End (local epoch s)', 'End Local Date (serial)', 'Archive (MM/YY)',
-      'Is Live', 'Time Class', 'Base Time (s)', 'Increment (s)', 'Correspondence Time (s)',
-      'Is White', 'Opponent', 'My Rating', 'Opp Rating',
+      'Is Live', 'Time Class', 'Format', 'Base Time (s)', 'Increment (s)', 'Correspondence Time (s)',
+      'Is White', 'Opponent', 'My Rating', 'Opp Rating', 'Rating Before', 'Delta',
       'Outcome', 'Termination',
       'ECO', 'Opening Name', 'Opening Family',
       'Ply Count',
