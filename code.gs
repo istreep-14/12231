@@ -1607,11 +1607,7 @@ function setupSheets() {
   }
 
   
-  // Apply formatting to existing Games sheet if it exists
-  if (gamesSheet) {
-    gamesSheet.getRange('B:B').setNumberFormat('m"/"d"/"yy');
-    gamesSheet.getRange('C:C').setNumberFormat('h:mm AM/PM');
-  }
+  // No legacy Games formatting needed
   
    let callbackSheet = ss.getSheetByName(SHEETS.CALLBACK);
   if (!callbackSheet) {
@@ -1637,18 +1633,7 @@ function setupSheets() {
     callbackSheet.getRange('K:K').setNumberFormat('@STRING@');
   }
 
-  // Ensure Games (Archive) sheet exists with identical headers
-  let gamesArchive = ss.getSheetByName('Games (Archive)');
-  if (!gamesArchive) {
-    gamesArchive = ss.insertSheet('Games (Archive)');
-    gamesArchive.getRange(1, 1, 1, headers.length).setValues([headers]);
-    gamesArchive.getRange(1, 1, 1, headers.length)
-      .setFontWeight('bold')
-      .setBackground('#666666')
-      .setFontColor('#ffffff');
-    gamesArchive.setFrozenRows(1);
-    gamesArchive.hideSheet();
-  }
+  // No archive sheet
 
   // Ensure Openings DB sheet exists with headers for paste/import
   let dbSheet = ss.getSheetByName(SHEETS.OPENINGS_DB);
