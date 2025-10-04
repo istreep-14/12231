@@ -826,6 +826,7 @@ function processGamesData(games, username) {
         timeClass,
         tcParsed.baseTime,
         tcParsed.increment,
+        tcParsed.correspondenceTime,
         isWhite,
         opponent || 'Unknown',
         myRating || 'N/A',
@@ -1324,7 +1325,7 @@ function setupSheets() {
       // Combined lean schema
       'Game ID', 'Game URL',
       'Start', 'End', 'Duration (s)', 'Start (epoch s)', 'End (epoch s)',
-      'Is Live', 'Time Class', 'Base Time (s)', 'Increment (s)',
+      'Is Live', 'Time Class', 'Base Time (s)', 'Increment (s)', 'Correspondence Time (s)',
       'Is White', 'Opponent', 'My Rating', 'Opp Rating',
       'Outcome', 'Termination',
       'ECO', 'Opening Name', 'Opening Family',
