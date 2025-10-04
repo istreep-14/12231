@@ -1669,9 +1669,9 @@ function setupSheets() {
 // ============================================
 function refreshDerivedDbMappings() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   if (!derivedSheet) {
-    SpreadsheetApp.getUi().alert('Derived sheet not found');
+    SpreadsheetApp.getUi().alert('Games sheet not found');
     return;
   }
   // Ensure cache is loaded fresh
@@ -1732,14 +1732,14 @@ function refreshDerivedDbMappings() {
 // ============================================
 function enrichMoveTimesForSelection() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(SHEETS.DERIVED);
+  const sheet = ss.getSheetByName(SHEETS.GAMES);
   if (!sheet) {
-    SpreadsheetApp.getUi().alert('Derived Data sheet not found');
+    SpreadsheetApp.getUi().alert('Games sheet not found');
     return;
   }
   const range = ss.getActiveRange();
-  if (!range || range.getSheet().getName() !== SHEETS.DERIVED) {
-    SpreadsheetApp.getUi().alert('Select rows in Derived Data to enrich.');
+  if (!range || range.getSheet().getName() !== SHEETS.GAMES) {
+    SpreadsheetApp.getUi().alert('Select rows in Games to enrich.');
     return;
   }
   let startRow = range.getRow();
@@ -1756,9 +1756,9 @@ function enrichMoveTimesForSelection() {
   const colIsLive = headers.indexOf('Is Live') + 1;
   const colBase = headers.indexOf('Base Time (s)') + 1;
   const colInc = headers.indexOf('Increment (s)') + 1;
-  const colMc36 = headers.indexOf('mc36') + 1;
+  const colMc36 = headers.indexOf('clocks') + 1;
   if (colIsLive <= 0 || colBase <= 0 || colInc <= 0 || colMc36 <= 0) {
-    SpreadsheetApp.getUi().alert('Missing required columns (Is Live, Base Time (s), Increment (s), mc36).');
+    SpreadsheetApp.getUi().alert('Missing required columns (Is Live, Base Time (s), Increment (s), clocks).');
     return;
   }
 
