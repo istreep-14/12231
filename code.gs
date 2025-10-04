@@ -1707,114 +1707,39 @@ function refreshDerivedDbMappings() {
     return;
   }
 
-  // Determine starting column for DB headers, ensuring they exist
-  let startDbCol = -1;
-  for (let i = 0; i < DERIVED_DB_HEADERS.length; i++) {
-    const idx = headers.indexOf(DERIVED_DB_HEADERS[i]);
-    if (idx >= 0) {
-      startDbCol = startDbCol === -1 ? (idx + 1) : Math.min(startDbCol, idx + 1);
-    }
+  // Ensure minimal opening columns exist: Opening Name, Opening Family
+  let openingNameCol = headers.indexOf('Opening Name') + 1;
+  let openingFamilyCol = headers.indexOf('Opening Family') + 1;
+  if (openingNameCol <= 0) {
+    derivedSheet.insertColumnAfter(ecoCol);
+    openingNameCol = ecoCol + 1;
+    derivedSheet.getRange(1, openingNameCol).setValue('Opening Name')
+      .setFontWeight('bold').setBackground('#666666').setFontColor('#ffffff');
   }
-  if (startDbCol === -1) {
-    // Append columns if missing
-    let currentHeaders = headers.slice();
-    for (const header of DERIVED_DB_HEADERS) {
-      currentHeaders = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
-      if (!currentHeaders.includes(header)) {
-        derivedSheet.insertColumnAfter(derivedSheet.getLastColumn());
-        const col = derivedSheet.getLastColumn();
-        derivedSheet.getRange(1, col).setValue(header)
-          .setFontWeight('bold')
-          .setBackground('#666666')
-          .setFontColor('#ffffff');
-      }
-    }
-    // Recompute
-    const newHeaders = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
-    startDbCol = newHeaders.indexOf(DERIVED_DB_HEADERS[0]) + 1;
+  if (openingFamilyCol <= 0) {
+    derivedSheet.insertColumnAfter(openingNameCol);
+    openingFamilyCol = openingNameCol + 1;
+    derivedSheet.getRange(1, openingFamilyCol).setValue('Opening Family')
+      .setFontWeight('bold').setBackground('#666666').setFontColor('#ffffff');
   }
 
   const ecoSlugs = derivedSheet.getRange(2, ecoCol, lastRow - 1, 1).getValues().map(r => String(r[0] || ''));
-  const writeRows = [];
+  const names = [];
+  const fams = [];
   for (const ecoSlug of ecoSlugs) {
-    const vals = getOpeningOutputs(ecoSlug);
-    writeRows.push(vals);
+    const [name, fam] = getOpeningOutputs(ecoSlug);
+    names.push([name]);
+    fams.push([fam]);
   }
-
-  derivedSheet.getRange(2, startDbCol, writeRows.length, DERIVED_OPENING_HEADERS.length).setValues(writeRows);
+  derivedSheet.getRange(2, openingNameCol, names.length, 1).setValues(names);
+  derivedSheet.getRange(2, openingFamilyCol, fams.length, 1).setValues(fams);
   SpreadsheetApp.getUi().alert('✅ Opening mappings refreshed');
 }
 
 // ============================================
 // ENRICHMENT: Reconstruct Move Times for selection
 // ============================================
-function enrichMoveTimesForSelection() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(SHEETS.GAMES);
-  if (!sheet) {
-    SpreadsheetApp.getUi().alert('Games sheet not found');
-    return;
-  }
-  const range = ss.getActiveRange();
-  if (!range || range.getSheet().getName() !== SHEETS.GAMES) {
-    SpreadsheetApp.getUi().alert('Select rows in Games to enrich.');
-    return;
-  }
-  let startRow = range.getRow();
-  let numRows = range.getNumRows();
-  if (startRow === 1) {
-    startRow = 2; // skip header
-    numRows = Math.max(0, (range.getRow() + range.getNumRows() - 1) - 1);
-  }
-  if (numRows <= 0) return;
-
-  const lastCol = sheet.getLastColumn();
-  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
-
-  const colIsLive = headers.indexOf('Is Live') + 1;
-  const colBase = headers.indexOf('Base Time (s)') + 1;
-  const colInc = headers.indexOf('Increment (s)') + 1;
-  const colMc36 = headers.indexOf('clocks') + 1;
-  if (colIsLive <= 0 || colBase <= 0 || colInc <= 0 || colMc36 <= 0) {
-    SpreadsheetApp.getUi().alert('Missing required columns (Is Live, Base Time (s), Increment (s), clocks).');
-    return;
-  }
-
-  // Ensure mt36 column exists (encoded move times, deciseconds base-36)
-  let colMt36 = headers.indexOf('mt36') + 1;
-  if (colMt36 <= 0) {
-    sheet.insertColumnAfter(colMc36);
-    colMt36 = colMc36 + 1;
-    sheet.getRange(1, colMt36).setValue('mt36')
-      .setFontWeight('bold')
-      .setBackground('#666666')
-      .setFontColor('#ffffff');
-  }
-
-  const data = sheet.getRange(startRow, 1, numRows, lastCol).getValues();
-  const out = new Array(numRows).fill('').map(() => ['']);
-
-  for (let r = 0; r < data.length; r++) {
-    try {
-      const row = data[r];
-      const isLive = row[colIsLive - 1] === true || String(row[colIsLive - 1]).toLowerCase() === 'true';
-      const baseSec = parseFloat(row[colBase - 1]) || 0;
-      const incSec = parseFloat(row[colInc - 1]) || 0;
-      const mc36 = String(row[colMc36 - 1] || '');
-      if (!isLive || !mc36) { out[r][0] = ''; continue; }
-      const clocksDeci = decodeBase36Seq(mc36);
-      const baseDeci = Math.round(baseSec * 10);
-      const incDeci = Math.round(incSec * 10);
-      const timesDeci = reconstructTimesFromClocksDeci(baseDeci, incDeci, clocksDeci);
-      out[r][0] = encodeBase36Seq(timesDeci);
-    } catch (e) {
-      out[r][0] = '';
-    }
-  }
-
-  sheet.getRange(startRow, colMt36, numRows, 1).setValues(out);
-  ss.toast('Move Times (mt36) enriched for selection', '🧪', 3);
-}
+// enrichMoveTimesForSelection removed: clocks are already stored; times can be derived on demand
 
 
 // Helpers for base-36 sequences in deciseconds
