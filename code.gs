@@ -209,7 +209,6 @@ const SHEETS = {
   GAMES: 'Games',
   ANALYSIS: 'Analysis',
   CALLBACK: 'Callback',
-  DERIVED: 'Games', // alias kept for compatibility
   OPENINGS_DB: 'Openings DB'
 };
 
