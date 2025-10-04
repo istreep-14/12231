@@ -829,9 +829,12 @@ function processGamesData(games, username) {
       const startEpoch = startDateTime ? Math.floor(startDateTime.getTime() / 1000) : null;
       const endEpoch = Math.floor(endDateTime.getTime() / 1000);
       const endLocalEpoch = endEpoch; // Store UTC epoch; convert to local in formulas if needed
-      const endLocalYmd = (() => {
-        const d = new Date(endDateTime);
-        return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+      const endLocalSerial = (() => {
+        // Google Sheets serial date: days since 1899-12-30 (accounts for 1900 leap bug)
+        const msPerDay = 24 * 60 * 60 * 1000;
+        const epoch = new Date(Date.UTC(1899, 11, 30));
+        const localDate = new Date(endDateTime.getFullYear(), endDateTime.getMonth(), endDateTime.getDate());
+        return Math.floor((localDate.getTime() - epoch.getTime()) / msPerDay);
       })();
 
       // Archive tag (MM/YY) from end UTC
@@ -845,7 +848,7 @@ function processGamesData(games, username) {
         startEpoch,
         endEpoch,
         endLocalEpoch,
-        endLocalYmd,
+        endLocalSerial,
         archiveTag,
         timeClass.toLowerCase() !== 'daily',
         timeClass,
@@ -1303,7 +1306,7 @@ function setupSheets() {
     const headers = [
       // Combined lean schema
       'Game ID',
-      'Start (epoch s)', 'End (epoch s)', 'End (local epoch s)', 'End Local Date (yyyymmdd)', 'Archive (MM/YY)',
+      'Start (epoch s)', 'End (epoch s)', 'End (local epoch s)', 'End Local Date (serial)', 'Archive (MM/YY)',
       'Is Live', 'Time Class', 'Base Time (s)', 'Increment (s)', 'Correspondence Time (s)',
       'Is White', 'Opponent', 'My Rating', 'Opp Rating',
       'Outcome', 'Termination',
