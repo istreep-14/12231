@@ -8,10 +8,12 @@ const CONFIG = {
 };
 
 const SHEETS = {
+  // Combined sheet is the canonical games table
   GAMES: 'Games',
   ANALYSIS: 'Analysis',
   CALLBACK: 'Callback',
-  DERIVED: 'Derived Data'
+  DERIVED: 'Games', // alias kept for compatibility
+  OPENINGS_DB: 'Openings DB'
 };
 
 // Result to outcome mapping
@@ -52,6 +54,18 @@ const TERMINATION_MAP = {
   'bughousepartnerlose': 'Bughouse partner lost'
 };
 
+// Cache for openings database (sheet-backed)
+let OPENINGS_DB_CACHE = null;
+const OPENINGS_DB_HEADERS = [
+  'Name', 'Trim Slug', 'Family', 'Name',
+  'Variation 1', 'Variation 2', 'Variation 3', 'Variation 4', 'Variation 5', 'Variation 6'
+];
+
+// Minimal opening outputs to store in-sheet
+const DERIVED_OPENING_HEADERS = [
+  'Opening Name', 'Opening Family'
+];
+
 // ============================================
 // MAIN MENU
 // ============================================
@@ -63,6 +77,7 @@ function onOpen() {
     .addItem('3️⃣ Update Recent Games', 'fetchChesscomGames')
     .addSeparator()
     .addItem('📋 Fetch Callback Last 10', 'fetchCallbackLast10')
+    .addItem('🔗 Refresh Opening Mappings', 'refreshDerivedDbMappings')
     .addToUi();
 }
 
@@ -251,10 +266,10 @@ function fetchCallbackLast50() { fetchCallbackLastN(50); }
 
 function fetchCallbackLastN(count) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   const callbackSheet = ss.getSheetByName(SHEETS.CALLBACK);
   
-  if (!gamesSheet || !callbackSheet) {
+  if (!derivedSheet || !callbackSheet) {
     SpreadsheetApp.getUi().alert('❌ Please run "Setup Sheets" first!');
     return;
   }
@@ -280,40 +295,41 @@ function fetchCallbackLastN(count) {
 
 function getGamesWithoutCallback(maxCount) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
-  const data = gamesSheet.getDataRange().getValues();
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
+  if (!derivedSheet) return [];
+  const data = derivedSheet.getDataRange().getValues();
   const games = [];
   
-  // Iterate from newest to oldest (reverse order)
+  // Iterate from newest to oldest (reverse order) using combined columns
+  // Combined columns: [0]=Game ID, [1]=Game URL, [5]=Start epoch, [6]=End epoch, [7]=Is Live, [8]=Time Class
+  // Callback tracking: add a 'Callback Fetched' boolean column at end if missing
+  const header = data[0] || [];
+  let cbCol = header.indexOf('Callback Fetched');
+  if (cbCol === -1) {
+    derivedSheet.insertColumnAfter(derivedSheet.getLastColumn());
+    cbCol = derivedSheet.getLastColumn() - 1;
+    derivedSheet.getRange(1, cbCol + 1).setValue('Callback Fetched')
+      .setFontWeight('bold')
+      .setBackground('#666666')
+      .setFontColor('#ffffff');
+  }
   for (let i = data.length - 1; i >= 1 && games.length < maxCount; i--) {
-    if (data[i][13] === false) { // Callback Fetched column (index 13)
-      const myColor = data[i][3];
-      const opponent = data[i][4];
-      const gameId = data[i][11];
-      
-      // Get time class from derived data
-      const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
-      let timeClass = '';
-      
-      if (derivedSheet) {
-        const derivedData = derivedSheet.getDataRange().getValues();
-        for (let j = 1; j < derivedData.length; j++) {
-          if (derivedData[j][0] === gameId) {
-            timeClass = derivedData[j][5];
-            break;
-          }
-        }
-      }
-      
-      games.push({
-        row: i + 1,
-        gameId: gameId,
-        gameUrl: data[i][0],
-        white: myColor === 'white' ? CONFIG.USERNAME : opponent,
-        black: myColor === 'black' ? CONFIG.USERNAME : opponent,
-        timeClass: timeClass
-      });
-    }
+    if (data[i][cbCol] === true) continue;
+    const gameId = data[i][0];
+    const timeClass = data[i][8];
+    const isLive = data[i][7];
+    const url = data[i][1];
+    const whiteUser = ''; // unknown without reading PGN here
+    const blackUser = '';
+    if (!gameId) continue;
+    games.push({
+      row: i + 1,
+      gameId: gameId,
+      gameUrl: url,
+      white: whiteUser,
+      black: blackUser,
+      timeClass: timeClass
+    });
   }
   
   return games.reverse(); // Return in chronological order (oldest first)
@@ -321,7 +337,7 @@ function getGamesWithoutCallback(maxCount) {
 
 function fetchCallbackForGames(gamesToFetch) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   
   let successCount = 0;
   let errorCount = 0;
@@ -339,8 +355,18 @@ function fetchCallbackForGames(gamesToFetch) {
         saveCallbackData(callbackData);
         
         // Mark callback as fetched
-        if (game.row) {
-          gamesSheet.getRange(game.row, 14).setValue(true); // Callback Fetched column (index 14)
+        if (game.row && derivedSheet) {
+          const header = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
+          let cbCol = header.indexOf('Callback Fetched');
+          if (cbCol === -1) {
+            derivedSheet.insertColumnAfter(derivedSheet.getLastColumn());
+            cbCol = derivedSheet.getLastColumn() - 1;
+            derivedSheet.getRange(1, cbCol + 1).setValue('Callback Fetched')
+              .setFontWeight('bold')
+              .setBackground('#666666')
+              .setFontColor('#ffffff');
+          }
+          derivedSheet.getRange(game.row, cbCol + 1).setValue(true);
         }
         
         successCount++;
@@ -380,9 +406,9 @@ function findGameRow(gameId) {
 function fetchAllGamesInitial() {
   const username = CONFIG.USERNAME;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   
-  if (!gamesSheet) {
+  if (!derivedSheet) {
     SpreadsheetApp.getUi().alert('❌ Please run "Setup Sheets" first!');
     return;
   }
@@ -432,12 +458,13 @@ function fetchAllGamesInitial() {
       Logger.log(`Archive ${i + 1}/${archives.length}: ${response.data?.games?.length || 0} games`);
     }
     
-    // Filter out duplicates before processing
+    // Filter out duplicates before processing (use Derived sheet Game ID)
     const existingGameIds = new Set();
-    if (gamesSheet.getLastRow() > 1) {
-      const existingData = gamesSheet.getDataRange().getValues();
+    if (derivedSheet.getLastRow() > 1) {
+      const existingData = derivedSheet.getDataRange().getValues();
+      // 'Game ID' is column 1 in combined sheet
       for (let i = 1; i < existingData.length; i++) {
-        existingGameIds.add(existingData[i][11]); // Game ID column (index 11)
+        existingGameIds.add(existingData[i][0]);
       }
     }
     
@@ -447,11 +474,9 @@ function fetchAllGamesInitial() {
     });
     
     ss.toast(`Processing ${newGames.length} games...`, '⏳', -1);
-    const rows = processGamesData(newGames, username);
+    const processedCount = processGamesData(newGames, username);
     
-    if (rows.length > 0) {
-      const lastRow = gamesSheet.getLastRow();
-      gamesSheet.getRange(lastRow + 1, 1, rows.length, rows[0].length).setValues(rows);
+    if (processedCount > 0) {
       
       // Find and store the most recent game URL (latest end_time)
       let mostRecentGame = newGames[0];
@@ -462,6 +487,14 @@ function fetchAllGamesInitial() {
       }
       props.setProperty('LAST_GAME_URL', mostRecentGame.url);
       props.setProperty('INITIAL_FETCH_COMPLETE', 'true');
+      // Mark previous month as finalized, since initial fetch pulled all archives
+      const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const prevYear = prevMonthDate.getFullYear();
+      const prevMonth = String(prevMonthDate.getMonth() + 1).padStart(2, '0');
+      const prevYearMonth = `${prevYear}_${prevMonth}`;
+      if (prevYearMonth !== currentYearMonth) {
+        props.setProperty('LAST_FINALIZED_MONTH', prevYearMonth);
+      }
       
       ss.toast(`✅ Fetched ${newGames.length} games!`, '✅', 5);
       
@@ -477,9 +510,9 @@ function fetchAllGamesInitial() {
 function fetchChesscomGames() {
   const username = CONFIG.USERNAME;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   
-  if (!gamesSheet) {
+  if (!derivedSheet) {
     SpreadsheetApp.getUi().alert('❌ Please run "Setup Sheets" first!');
     return;
   }
@@ -520,12 +553,17 @@ function fetchChesscomGames() {
     const prevMonth = String(prevMonthDate.getMonth() + 1).padStart(2, '0');
     const prevYearMonth = `${prevYear}_${prevMonth}`;
     const lastFinalizedMonth = props.getProperty('LAST_FINALIZED_MONTH') || '';
-    
+
     // If previous month hasn't been finalized and it's not current month, fetch it
     if (lastFinalizedMonth !== prevYearMonth && prevYearMonth !== currentYearMonth) {
-      const prevArchiveUrl = `https://api.chess.com/pub/player/${username}/games/${prevYear}/${prevMonth}`;
-      archivesToCheck.push({url: prevArchiveUrl, key: prevYearMonth, isCurrent: false});
-      ss.toast('Finalizing previous month...', '⏳', -1);
+      // If Games sheet already contains any row from the previous month, consider it finalized
+      if (isMonthPresentInGamesSheet(prevYear, parseInt(prevMonth, 10))) {
+        props.setProperty('LAST_FINALIZED_MONTH', prevYearMonth);
+      } else {
+        const prevArchiveUrl = `https://api.chess.com/pub/player/${username}/games/${prevYear}/${prevMonth}`;
+        archivesToCheck.push({url: prevArchiveUrl, key: prevYearMonth, isCurrent: false});
+        ss.toast('Finalizing previous month...', '⏳', -1);
+      }
     }
     
     // Always check current month
@@ -552,23 +590,32 @@ function fetchChesscomGames() {
         props.setProperty('LAST_FINALIZED_MONTH', archive.key);
       }
       
-      const gamesData = response.data.games;
+      const gamesData = (response.data && response.data.games) ? response.data.games : [];
       
       if (lastKnownGameUrl) {
-        // Iterate from end to start (newest to oldest)
-        for (let i = gamesData.length - 1; i >= 0; i--) {
+        // Add only games strictly newer than lastKnownGameUrl
+        let encounteredLast = false;
+        for (let i = 0; i < gamesData.length; i++) {
           const game = gamesData[i];
-          
           if (game.url === lastKnownGameUrl) {
+            encounteredLast = true;
             foundLastKnownGame = true;
             break;
           }
-          
-          allGames.unshift(game); // Add to front to maintain order
         }
-        
-        if (foundLastKnownGame) break;
+        if (!encounteredLast) {
+          // Whole archive is newer; append all
+          allGames.push(...gamesData);
+        } else {
+          // Collect only newer ones (after lastKnown)
+          for (let i = gamesData.length - 1; i >= 0; i--) {
+            const game = gamesData[i];
+            if (game.url === lastKnownGameUrl) break;
+            allGames.unshift(game);
+          }
+        }
       } else {
+        // No last known; but to avoid refetching entire previous month, rely on ETag check + duplicate filter.
         allGames.push(...gamesData);
       }
     }
@@ -579,17 +626,24 @@ function fetchChesscomGames() {
     }
     
     // Filter out duplicates before processing
+    // Also skip any game older than or equal to last known by end_time if URL unknown
     const existingGameIds = new Set();
-    if (gamesSheet.getLastRow() > 1) {
-      const existingData = gamesSheet.getDataRange().getValues();
+    let lastKnownEndTime = 0;
+    if (derivedSheet.getLastRow() > 1) {
+      const existingData = derivedSheet.getDataRange().getValues();
       for (let i = 1; i < existingData.length; i++) {
-        existingGameIds.add(existingData[i][11]); // Game ID column (index 11)
+        const gid = existingData[i][0]; // Game ID
+        const endEpoch = existingData[i][2]; // End (epoch s)
+        if (gid) existingGameIds.add(gid);
+        if (typeof endEpoch === 'number' && endEpoch > lastKnownEndTime) lastKnownEndTime = endEpoch;
       }
     }
-    
+
     const newGames = allGames.filter(game => {
       const gameId = game.url.split('/').pop();
-      return !existingGameIds.has(gameId);
+      if (existingGameIds.has(gameId)) return false;
+      if (lastKnownEndTime && game.end_time && game.end_time <= lastKnownEndTime) return false;
+      return true;
     });
     
     if (newGames.length === 0) {
@@ -598,13 +652,11 @@ function fetchChesscomGames() {
     }
     
     ss.toast(`Found ${newGames.length} new games. Processing...`, '⏳', -1);
-    const rows = processGamesData(newGames, username);
+    const processedCount = processGamesData(newGames, username);
     
-    if (rows.length > 0) {
-      const lastRow = gamesSheet.getLastRow();
-      gamesSheet.getRange(lastRow + 1, 1, rows.length, rows[0].length).setValues(rows);
+    if (processedCount > 0) {
       
-      // Find the most recent game from the new games fetched
+      // Update last known game URL to the newest by end_time among all new and existing
       let mostRecentGame = newGames[0];
       for (const game of newGames) {
         if (game.end_time > mostRecentGame.end_time) {
@@ -613,13 +665,13 @@ function fetchChesscomGames() {
       }
       props.setProperty('LAST_GAME_URL', mostRecentGame.url);
       
-      ss.toast(`✅ Added ${rows.length} new games!`, '✅', 5);
+      ss.toast(`✅ Added ${newGames.length} new games!`, '✅', 5);
       
       // Process auto-analysis and callback data for new games
       const gamesToProcess = newGames.map(g => {
         const gameId = g.url.split('/').pop();
         return {
-          row: findGameRow(gameId),
+          row: -1, // legacy Games sheet row no longer used
           gameId: gameId,
           gameUrl: g.url,
           white: g.white?.username || '',
@@ -628,7 +680,7 @@ function fetchChesscomGames() {
           outcome: getGameOutcome(g, CONFIG.USERNAME),
           pgn: g.pgn || ''
         };
-      }).filter(g => g.row > 0 && g.gameId && g.white && g.black);
+      }).filter(g => g.gameId && g.white && g.black);
       
       processNewGamesAutoFeatures(gamesToProcess);
       
@@ -717,37 +769,13 @@ function processGamesData(games, username) {
   const rows = [];
   const derivedRows = [];
   
-  // Sort games by timestamp (oldest first) to ensure Last Rating fills correctly
+  // Sort games by timestamp (oldest first)
   const sortedGames = games.slice().sort((a, b) => a.end_time - b.end_time);
   
   // Pre-load existing games data once for performance
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
-  const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   let existingGames = [];
-  
-  if (gamesSheet && gamesSheet.getLastRow() > 1) {
-    const data = gamesSheet.getDataRange().getValues();
-    // Build lookup map: format -> array of {timestamp, rating}
-    for (let i = 1; i < data.length; i++) {
-      try {
-        const format = data[i][7]; // Format column (index 7)
-        const endDate = data[i][1]; // End Date column
-        const endTime = data[i][2]; // End Time column
-        const myRating = data[i][8]; // My Rating column (index 8)
-        const timestamp = new Date(endDate + ' ' + endTime).getTime() / 1000;
-        
-        existingGames.push({
-          format: format,
-          timestamp: timestamp,
-          rating: myRating
-        });
-      } catch (error) {
-        // Skip malformed rows
-        continue;
-      }
-    }
-  }
   
   for (const game of sortedGames) {
     try {
@@ -757,9 +785,11 @@ function processGamesData(games, username) {
       }
       
       const endDate = new Date(game.end_time * 1000);
+      const startDate = extractStartFromPGN(game.pgn) || null;
       const gameId = game.url.split('/').pop();
       const eco = extractECOFromPGN(game.pgn);
       const ecoUrl = extractECOUrlFromPGN(game.pgn);
+      const ecoSlug = extractECOSlug(ecoUrl);
       const outcome = getGameOutcome(game, username);
       const termination = getGameTermination(game, username);
       const format = getGameFormat(game);
@@ -773,85 +803,88 @@ function processGamesData(games, username) {
       const myRating = isWhite ? game.white?.rating : game.black?.rating;
       const oppRating = isWhite ? game.black?.rating : game.white?.rating;
       
-      // Calculate Last Rating from pre-loaded data AND games processed in this batch
+      // Last Rating deprecated in combined sheet; keep legacy computation only for Games rows if needed
       let lastRating = null;
-      let lastGameTime = 0;
-      
-      // Check existing games from sheet
-      for (const existingGame of existingGames) {
-        if (existingGame.format === format && 
-            existingGame.timestamp < game.end_time && 
-            existingGame.timestamp > lastGameTime) {
-          lastGameTime = existingGame.timestamp;
-          lastRating = existingGame.rating;
-        }
-      }
       
       // Parse time control
       const tcParsed = parseTimeControl(game.time_control, game.time_class);
       
-      // Extract moves with clocks and times
+      // Extract compact move data
+      const tcn = game.tcn || extractTCNFromPGN(game.pgn) || '';
       const moveData = extractMovesWithClocks(game.pgn, tcParsed.baseTime, tcParsed.increment);
+      const mc36 = encodeClocksBase36(moveData.clocks);
       
-      // Create proper date/time objects
-      // End Date: Set to midnight of the game's date (no time component)
-      const endDateObj = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
-      
-      // End Time: Create a date with just time component (use epoch date + time)
-      const endTimeObj = new Date(1970, 0, 1, endDate.getHours(), endDate.getMinutes(), endDate.getSeconds());
-      
-      // Combined End DateTime for derived sheet
+      // Combined Start/End datetimes
       const endDateTime = new Date(endDate.getTime());
+      const startDateTime = startDate ? new Date(startDate.getTime()) : (duration && duration > 0 ? new Date(endDateTime.getTime() - (duration * 1000)) : null);
       
-      // Calculate start time from duration
-      let startDateTime = null;
-      let startDateObj = null;
-      let startTimeObj = null;
-      
-      if (duration && duration > 0) {
-        startDateTime = new Date(endDateTime.getTime() - (duration * 1000));
-        startDateObj = new Date(startDateTime.getFullYear(), startDateTime.getMonth(), startDateTime.getDate());
-        startTimeObj = new Date(1970, 0, 1, startDateTime.getHours(), startDateTime.getMinutes(), startDateTime.getSeconds());
-      }
-      
-      rows.push([
-        game.url, endDateObj, endTimeObj, myColor, opponent || 'Unknown',
-        outcome, termination, format,
-        myRating || 'N/A', oppRating || 'N/A', lastRating || 'N/A',
-        gameId, false, false
-      ]);
+      // No longer writing legacy Games rows; combined output only
       
       // Calculate Moves (ply count / 2 rounded up)
       const movesCount = moveData.plyCount > 0 ? Math.ceil(moveData.plyCount / 2) : 0;
       
-      // Store derived data in hidden sheet
+      // Compute Rating Before/Delta (fast, format-local)
+      // Use last seen rating for this format from prior writes in this batch, else from a small cache from existing sheet
+      if (!processGamesData._formatLast) processGamesData._formatLast = new Map();
+      const key = format;
+      const last = processGamesData._formatLast.get(key);
+      const ratingBefore = (typeof last === 'number') ? last : null;
+      const deltaQuick = (ratingBefore != null && typeof myRating === 'number') ? (myRating - ratingBefore) : null;
+
+      // Update cache with this game's rating for subsequent rows
+      if (typeof myRating === 'number') processGamesData._formatLast.set(key, myRating);
+
+      // Store combined lean data in derived sheet
+      const dbValues = getOpeningOutputs(ecoSlug);
+      const startLocalEpoch = startDateTime ? Math.floor(new Date(startDateTime.getFullYear(), startDateTime.getMonth(), startDateTime.getDate(), startDateTime.getHours(), startDateTime.getMinutes(), startDateTime.getSeconds()).getTime() / 1000) : null;
+      const endLocalEpoch = Math.floor(new Date(endDateTime.getFullYear(), endDateTime.getMonth(), endDateTime.getDate(), endDateTime.getHours(), endDateTime.getMinutes(), endDateTime.getSeconds()).getTime() / 1000);
+      const endLocalSerial = (() => {
+        // Google Sheets serial date: days since 1899-12-30 (accounts for 1900 leap bug)
+        const msPerDay = 24 * 60 * 60 * 1000;
+        const epoch = new Date(Date.UTC(1899, 11, 30));
+        const localDate = new Date(endDateTime.getFullYear(), endDateTime.getMonth(), endDateTime.getDate());
+        return Math.floor((localDate.getTime() - epoch.getTime()) / msPerDay);
+      })();
+      const endLocalTime = (() => {
+        // Seconds since local midnight
+        const d = new Date(endDateTime);
+        return d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
+      })();
+
+      // Archive tag (MM/YY) from end UTC
+      const archiveTag = (() => {
+        const d = new Date(endDateTime);
+        return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getFullYear()).slice(-2)}`;
+      })();
+
       derivedRows.push([
-  gameId,
-  game.white?.username || 'Unknown',
-  game.black?.username || 'Unknown',
-  game.white?.rating || 'N/A',
-  game.black?.rating || 'N/A',
-  timeClass,
-  game.time_control || '',
-  tcParsed.type,
-  tcParsed.baseTime,
-  tcParsed.increment,
-  tcParsed.correspondenceTime,
-  eco,
-  ecoUrl,
-  extractECOSlug(ecoUrl), // NEW: ECO Slug column
-  game.rated !== undefined ? game.rated : true,
-  endDateTime,
-  startDateTime,
-  startDateObj,
-  startTimeObj,
-  duration,
-  moveData.plyCount,
-  movesCount,
-  moveData.moveList,
-  moveData.clocks,
-  moveData.times
-]);
+        gameId,
+        startLocalEpoch,
+        endLocalEpoch,
+        endLocalSerial,
+        endLocalTime,
+        archiveTag,
+        timeClass.toLowerCase() !== 'daily',
+        timeClass,
+        format,
+        tcParsed.baseTime,
+        tcParsed.increment,
+        tcParsed.correspondenceTime,
+        isWhite,
+        opponent || 'Unknown',
+        myRating || 'N/A',
+        oppRating || 'N/A',
+        ratingBefore,
+        deltaQuick,
+        outcome,
+        termination,
+        eco,
+        dbValues[0], // Opening Name
+        dbValues[1], // Opening Family
+        moveData.plyCount,
+        tcn,
+        mc36
+      ]);
       
       // Add this game to existingGames for subsequent games in this batch
       existingGames.push({
@@ -866,14 +899,30 @@ function processGamesData(games, username) {
     }
   }
   
-  // Write derived data to hidden sheet
+  // Write combined data to Derived sheet
   if (derivedSheet && derivedRows.length > 0) {
     const lastRow = derivedSheet.getLastRow();
     derivedSheet.getRange(lastRow + 1, 1, derivedRows.length, derivedRows[0].length).setValues(derivedRows);
+    // Seed/refresh format-last cache from newly written rows to support subsequent fetches efficiently
+    const wrote = derivedSheet.getRange(lastRow + 1, 1, derivedRows.length, derivedRows[0].length).getValues();
+    if (!processGamesData._formatLast) processGamesData._formatLast = new Map();
+    for (const r of wrote) {
+      const fmt = r[8]; // Time Class or r[9] if Format; we use Format column index below
+      const formatColIndex = 9; // 0-based: Game ID(0), Start(1), End(2), EndLocal(3), DateSerial(4), Archive(5), IsLive(6), TimeClass(7), Format(8), Base(9)
+      const myRatingColIndex = 14; // My Rating after added columns
+      const formatVal = r[8];
+      const myRatingVal = r[14];
+      if (typeof myRatingVal === 'number') {
+        processGamesData._formatLast.set(formatVal, myRatingVal);
+      }
+    }
   }
   
-  return rows;
+  // Return count processed
+  return derivedRows.length;
 }
+
+function ensureDerivedDbColumns(_derivedSheet) { /* no-op: using minimal opening outputs inline */ }
 
 // Get game format based on rules and time control
 function getGameFormat(game) {
@@ -893,52 +942,7 @@ function getGameFormat(game) {
 
 // Remove duplicate games based on Game ID
 function removeDuplicates() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
-  
-  if (!gamesSheet) {
-    SpreadsheetApp.getUi().alert('❌ Games sheet not found!');
-    return;
-  }
-  
-  const data = gamesSheet.getDataRange().getValues();
-  const header = data[0];
-  const gameIdCol = 11; // Game ID column (index 11)
-  
-  const seen = new Set();
-  const rowsToKeep = [header];
-  let duplicateCount = 0;
-  
-  for (let i = 1; i < data.length; i++) {
-    const gameId = data[i][gameIdCol];
-    
-    if (!seen.has(gameId)) {
-      seen.add(gameId);
-      rowsToKeep.push(data[i]);
-    } else {
-      duplicateCount++;
-    }
-  }
-  
-  if (duplicateCount > 0) {
-    gamesSheet.clear();
-    gamesSheet.getRange(1, 1, rowsToKeep.length, rowsToKeep[0].length).setValues(rowsToKeep);
-    
-    gamesSheet.getRange(1, 1, 1, header.length)
-      .setFontWeight('bold')
-      .setBackground('#4285f4')
-      .setFontColor('#ffffff');
-    gamesSheet.setFrozenRows(1);
-    
-    SpreadsheetApp.getActiveSpreadsheet().toast(
-      `Removed ${duplicateCount} duplicate(s)`, 
-      '🗑️', 
-      3
-    );
-    Logger.log(`Removed ${duplicateCount} duplicates`);
-  } else {
-    SpreadsheetApp.getActiveSpreadsheet().toast('No duplicates found!', 'ℹ️', 2);
-  }
+  // No-op: legacy Games sheet duplicate removal removed
 }
 
 // ============================================
@@ -1042,6 +1046,132 @@ function extractECOSlug(ecoUrl) {
   return protected;
 }
 
+// ================================
+// OPENINGS DB LOOKUP (by ECO Slug)
+// ================================
+
+function loadOpeningsDbCache() {
+  if (OPENINGS_DB_CACHE) return OPENINGS_DB_CACHE;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const dbSheet = ss.getSheetByName(SHEETS.OPENINGS_DB);
+  const cache = new Map();
+  if (!dbSheet) {
+    OPENINGS_DB_CACHE = cache;
+    return cache;
+  }
+  const values = dbSheet.getDataRange().getValues();
+  if (!values || values.length < 2) {
+    OPENINGS_DB_CACHE = cache;
+    return cache;
+  }
+  const header = values[0];
+  const slugIdx = header.indexOf('Trim Slug');
+  const familyIdx = header.indexOf('Family');
+  // The TSV has two 'Name' headers. We'll treat the first as Full Name and the second as Base Name.
+  // Positions per OPENINGS_DB_HEADERS:
+  // 0: Name (Full), 1: Trim Slug, 2: Family, 3: Name (Base), 4..9: Variation 1..6
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const trimSlug = String(row[1] || '').trim();
+    if (!trimSlug) continue;
+    const fullName = String(row[0] || '');
+    const baseName = String(row[3] || '');
+    const family = String(row[2] || '');
+    const v1 = String(row[4] || '');
+    const v2 = String(row[5] || '');
+    const v3 = String(row[6] || '');
+    const v4 = String(row[7] || '');
+    const v5 = String(row[8] || '');
+    const v6 = String(row[9] || '');
+    cache.set(trimSlug, [fullName, family, baseName, v1, v2, v3, v4, v5, v6]);
+  }
+  OPENINGS_DB_CACHE = cache;
+  return cache;
+}
+
+function normalizeSlugForDb(ecoSlug) {
+  if (!ecoSlug) return '';
+  // The DB uses Title-Case with hyphens; ecoSlug looks similar but may include lowercase and numbers like with-3-Nc3
+  // We'll convert to Title-Case tokens separated by '-' and ensure castling tokens are normalized.
+  const tokens = ecoSlug
+    .replace(/_/g, '-')
+    .split('-')
+    .filter(Boolean)
+    .map(tok => {
+      if (/^with$/i.test(tok) || /^and$/i.test(tok)) return tok.charAt(0).toUpperCase() + tok.slice(1).toLowerCase();
+      if (/^o$/i.test(tok)) return 'O';
+      if (/^o\so$/i.test(tok)) return 'O-O';
+      // Preserve chess move tokens/case like Nf3, e4, O-O, but capitalize words
+      if (/^[a-z][a-z]+$/i.test(tok)) {
+        return tok.charAt(0).toUpperCase() + tok.slice(1);
+      }
+      return tok;
+    });
+  return tokens.join('-');
+}
+
+function getDbMappingValues(ecoSlug) {
+  // Returns array matching DERIVED_DB_HEADERS order
+  const empty = ['', '', '', '', '', '', '', '', ''];
+  if (!ecoSlug) return empty;
+  const db = loadOpeningsDbCache();
+  // Try direct match first
+  if (db.has(ecoSlug)) return db.get(ecoSlug);
+  // Try normalized form
+  const normalized = normalizeSlugForDb(ecoSlug);
+  if (db.has(normalized)) return db.get(normalized);
+  // Try loosening: drop trailing move qualifiers like 'with-3-Nc3' if not found
+  const withoutWith = ecoSlug.split('-with-')[0];
+  if (withoutWith && db.has(withoutWith)) return db.get(withoutWith);
+  const normalizedWithoutWith = normalized.split('-with-')[0];
+  if (normalizedWithoutWith && db.has(normalizedWithoutWith)) return db.get(normalizedWithoutWith);
+  return empty;
+}
+
+// Minimal opening outputs: [Opening Name, Opening Family]
+function getOpeningOutputs(ecoSlug) {
+  const db = loadOpeningsDbCache();
+  if (!ecoSlug) return ['', ''];
+  const keys = [ecoSlug, normalizeSlugForDb(ecoSlug), ecoSlug.split('-with-')[0] || '', normalizeSlugForDb(ecoSlug).split('-with-')[0] || ''];
+  for (const k of keys) {
+    if (k && db.has(k)) {
+      const row = db.get(k);
+      return [row[0] || '', row[2] || '']; // Full Name, Family
+    }
+  }
+  return ['', ''];
+}
+
+// Extract start datetime from PGN headers if available
+function extractStartFromPGN(pgn) {
+  if (!pgn) return null;
+  const dateMatch = pgn.match(/\[UTCDate "([^"]+)"\]/);
+  const timeMatch = pgn.match(/\[UTCTime "([^"]+)"\]/);
+  if (!dateMatch || !timeMatch) return null;
+  try {
+    const d = dateMatch[1].split('.');
+    const t = timeMatch[1].split(':');
+    return new Date(Date.UTC(parseInt(d[0]), parseInt(d[1]) - 1, parseInt(d[2]), parseInt(t[0]), parseInt(t[1]), parseInt(t[2])));
+  } catch (e) {
+    return null;
+  }
+}
+
+// Try to extract a TCN-like move list from PGN (fallback)
+function extractTCNFromPGN(_pgn) { return ''; }
+
+// Encode clocks (seconds) to base36 deciseconds dot-joined
+function encodeClocksBase36(clocksCsv) {
+  if (!clocksCsv) return '';
+  const parts = String(clocksCsv).split(',').map(s => s.trim()).filter(Boolean);
+  if (parts.length === 0) return '';
+  return parts.map(p => {
+    const ds = Math.round(parseFloat(p) * 10);
+    const val = isFinite(ds) && ds >= 0 ? ds : 0;
+    return val.toString(36);
+  }).join('.');
+}
+
 // Extract moves with clock times from PGN
 function extractMovesWithClocks(pgn, baseTime, increment) {
   if (!pgn) return { moves: [], clocks: [], times: [] };
@@ -1077,9 +1207,8 @@ function extractMovesWithClocks(pgn, baseTime, increment) {
     
     // Time spent = previous clock - current clock + increment
     let timeSpent = prevPlayerClock - clockSeconds + (increment || 0);
-    
-    // Minimum move time is 0.1 seconds (Chess.com enforces this)
-    if (timeSpent < 0.1) timeSpent = 0.1;
+    // Allow 0.0 seconds moves (e.g., premove)
+    if (timeSpent < 0) timeSpent = 0;
     
     times.push(Math.round(timeSpent * 10) / 10); // Round to 1 decimal
     
@@ -1185,7 +1314,7 @@ function setupSheets() {
     const headers = [
       'Game URL', 'End Date', 'End Time', 'My Color', 'Opponent',
       'Outcome', 'Termination', 'Format',
-      'My Rating', 'Opp Rating', 'Last Rating',
+      'My Rating', 'Opp Rating',
       'Game ID', 'Analyzed', 'Callback Fetched'
     ];
     gamesSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -1201,15 +1330,20 @@ function setupSheets() {
     gamesSheet.getRange('C:C').setNumberFormat('h:mm AM/PM');
   }
   
-  let derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
+  let derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   if (!derivedSheet) {
-    derivedSheet = ss.insertSheet(SHEETS.DERIVED);
+    derivedSheet = ss.insertSheet(SHEETS.GAMES);
     const headers = [
-      'Game ID', 'White Username', 'Black Username', 'White Rating', 'Black Rating',
-      'Time Class', 'Time Control', 'Type', 'Base Time', 'Increment', 'Correspondence Time',
-      'ECO', 'ECO URL', 'ECO Slug', 'Rated',
-      'End', 'Start', 'Start Date', 'Start Time', 'Duration (s)', 'Ply Count', 'Moves',
-      'Move List', 'Move Clocks', 'Move Times'
+      // Combined lean schema (local time standard)
+      'Game ID',
+      'Start', 'End', 'Date', 'Time', 'Archive (MM/YY)',
+      'Is Live', 'Time Class', 'Format', 'Base Time (s)', 'Increment (s)', 'Correspondence Time (s)',
+      'Is White', 'Opponent', 'My Rating', 'Opp Rating', 'Rating Before', 'Delta',
+      'Outcome', 'Termination',
+      'ECO', 'Opening Name', 'Opening Family',
+      'Ply Count',
+      // Compact detail
+      'tcn', 'clocks'
     ];
     derivedSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
     derivedSheet.getRange(1, 1, 1, headers.length)
@@ -1218,30 +1352,11 @@ function setupSheets() {
       .setFontColor('#ffffff');
     derivedSheet.setFrozenRows(1);
     
-    // Format date/time columns
-    derivedSheet.getRange('P:P').setNumberFormat('m"/"d"/"yy h:mm AM/PM'); // End
-    derivedSheet.getRange('Q:Q').setNumberFormat('m"/"d"/"yy h:mm AM/PM'); // Start
-    derivedSheet.getRange('R:R').setNumberFormat('m"/"d"/"yy'); // Start Date
-    derivedSheet.getRange('S:S').setNumberFormat('h:mm AM/PM'); // Start Time
+    // No formatted datetime columns in combined sheet
     
-    // Format Move Clocks and Move Times columns as text
-    derivedSheet.getRange('W:W').setNumberFormat('@STRING@'); // Move List
-    derivedSheet.getRange('X:X').setNumberFormat('@STRING@'); // Move Clocks
-    derivedSheet.getRange('Y:Y').setNumberFormat('@STRING@'); // Move Times
-    
-    // Hide the derived sheet
-    derivedSheet.hideSheet();
+    // Keep Games visible
   } else {
-    // If sheet exists, add ECO Slug column if not present
-    const headers = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
-    if (!headers.includes('ECO Slug')) {
-      // Insert new column after ECO URL (column 13)
-      derivedSheet.insertColumnAfter(13);
-      derivedSheet.getRange(1, 14).setValue('ECO Slug')
-        .setFontWeight('bold')
-        .setBackground('#666666')
-        .setFontColor('#ffffff');
-    }
+    // If a legacy sheet exists, we won't auto-migrate columns here.
   }
 
   
@@ -1274,9 +1389,184 @@ function setupSheets() {
     
     callbackSheet.getRange('K:K').setNumberFormat('@STRING@');
   }
+
+  // Ensure Games (Archive) sheet exists with identical headers
+  let gamesArchive = ss.getSheetByName('Games (Archive)');
+  if (!gamesArchive) {
+    gamesArchive = ss.insertSheet('Games (Archive)');
+    gamesArchive.getRange(1, 1, 1, headers.length).setValues([headers]);
+    gamesArchive.getRange(1, 1, 1, headers.length)
+      .setFontWeight('bold')
+      .setBackground('#666666')
+      .setFontColor('#ffffff');
+    gamesArchive.setFrozenRows(1);
+    gamesArchive.hideSheet();
+  }
+
+  // Ensure Openings DB sheet exists with headers for paste/import
+  let dbSheet = ss.getSheetByName(SHEETS.OPENINGS_DB);
+  if (!dbSheet) {
+    dbSheet = ss.insertSheet(SHEETS.OPENINGS_DB);
+    dbSheet.getRange(1, 1, 1, OPENINGS_DB_HEADERS.length).setValues([OPENINGS_DB_HEADERS]);
+    dbSheet.getRange(1, 1, 1, OPENINGS_DB_HEADERS.length)
+      .setFontWeight('bold')
+      .setBackground('#0b8043')
+      .setFontColor('#ffffff');
+    dbSheet.setFrozenRows(1);
+  }
   
   SpreadsheetApp.getUi().alert('✅ Sheets setup complete!');
 }
 
 
 
+
+// ============================================
+// UTILITIES: Refresh mappings across existing rows
+// ============================================
+function refreshDerivedDbMappings() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
+  if (!derivedSheet) {
+    SpreadsheetApp.getUi().alert('Derived sheet not found');
+    return;
+  }
+  // Ensure cache is loaded fresh
+  OPENINGS_DB_CACHE = null;
+  loadOpeningsDbCache();
+
+  const lastRow = derivedSheet.getLastRow();
+  const lastCol = derivedSheet.getLastColumn();
+  if (lastRow < 2) return;
+
+  const headers = derivedSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  const ecoCol = headers.indexOf('ECO') + 1;
+  if (ecoCol <= 0) {
+    SpreadsheetApp.getUi().alert('ECO column not found');
+    return;
+  }
+
+  // Determine starting column for DB headers, ensuring they exist
+  let startDbCol = -1;
+  for (let i = 0; i < DERIVED_DB_HEADERS.length; i++) {
+    const idx = headers.indexOf(DERIVED_DB_HEADERS[i]);
+    if (idx >= 0) {
+      startDbCol = startDbCol === -1 ? (idx + 1) : Math.min(startDbCol, idx + 1);
+    }
+  }
+  if (startDbCol === -1) {
+    // Append columns if missing
+    let currentHeaders = headers.slice();
+    for (const header of DERIVED_DB_HEADERS) {
+      currentHeaders = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
+      if (!currentHeaders.includes(header)) {
+        derivedSheet.insertColumnAfter(derivedSheet.getLastColumn());
+        const col = derivedSheet.getLastColumn();
+        derivedSheet.getRange(1, col).setValue(header)
+          .setFontWeight('bold')
+          .setBackground('#666666')
+          .setFontColor('#ffffff');
+      }
+    }
+    // Recompute
+    const newHeaders = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
+    startDbCol = newHeaders.indexOf(DERIVED_DB_HEADERS[0]) + 1;
+  }
+
+  const ecoSlugs = derivedSheet.getRange(2, ecoCol, lastRow - 1, 1).getValues().map(r => String(r[0] || ''));
+  const writeRows = [];
+  for (const ecoSlug of ecoSlugs) {
+    const vals = getOpeningOutputs(ecoSlug);
+    writeRows.push(vals);
+  }
+
+  derivedSheet.getRange(2, startDbCol, writeRows.length, DERIVED_OPENING_HEADERS.length).setValues(writeRows);
+  SpreadsheetApp.getUi().alert('✅ Opening mappings refreshed');
+}
+
+// ============================================
+// ENRICHMENT: Reconstruct Move Times for selection
+// ============================================
+function enrichMoveTimesForSelection() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEETS.DERIVED);
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert('Derived Data sheet not found');
+    return;
+  }
+  const range = ss.getActiveRange();
+  if (!range || range.getSheet().getName() !== SHEETS.DERIVED) {
+    SpreadsheetApp.getUi().alert('Select rows in Derived Data to enrich.');
+    return;
+  }
+  let startRow = range.getRow();
+  let numRows = range.getNumRows();
+  if (startRow === 1) {
+    startRow = 2; // skip header
+    numRows = Math.max(0, (range.getRow() + range.getNumRows() - 1) - 1);
+  }
+  if (numRows <= 0) return;
+
+  const lastCol = sheet.getLastColumn();
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+
+  const colIsLive = headers.indexOf('Is Live') + 1;
+  const colBase = headers.indexOf('Base Time (s)') + 1;
+  const colInc = headers.indexOf('Increment (s)') + 1;
+  const colMc36 = headers.indexOf('mc36') + 1;
+  if (colIsLive <= 0 || colBase <= 0 || colInc <= 0 || colMc36 <= 0) {
+    SpreadsheetApp.getUi().alert('Missing required columns (Is Live, Base Time (s), Increment (s), mc36).');
+    return;
+  }
+
+  // Ensure mt36 column exists (encoded move times, deciseconds base-36)
+  let colMt36 = headers.indexOf('mt36') + 1;
+  if (colMt36 <= 0) {
+    sheet.insertColumnAfter(colMc36);
+    colMt36 = colMc36 + 1;
+    sheet.getRange(1, colMt36).setValue('mt36')
+      .setFontWeight('bold')
+      .setBackground('#666666')
+      .setFontColor('#ffffff');
+  }
+
+  const data = sheet.getRange(startRow, 1, numRows, lastCol).getValues();
+  const out = new Array(numRows).fill('').map(() => ['']);
+
+  for (let r = 0; r < data.length; r++) {
+    try {
+      const row = data[r];
+      const isLive = row[colIsLive - 1] === true || String(row[colIsLive - 1]).toLowerCase() === 'true';
+      const baseSec = parseFloat(row[colBase - 1]) || 0;
+      const incSec = parseFloat(row[colInc - 1]) || 0;
+      const mc36 = String(row[colMc36 - 1] || '');
+      if (!isLive || !mc36) { out[r][0] = ''; continue; }
+      const clocksDeci = decodeBase36Seq(mc36);
+      const baseDeci = Math.round(baseSec * 10);
+      const incDeci = Math.round(incSec * 10);
+      const timesDeci = reconstructTimesFromClocksDeci(baseDeci, incDeci, clocksDeci);
+      out[r][0] = encodeBase36Seq(timesDeci);
+    } catch (e) {
+      out[r][0] = '';
+    }
+  }
+
+  sheet.getRange(startRow, colMt36, numRows, 1).setValues(out);
+  ss.toast('Move Times (mt36) enriched for selection', '🧪', 3);
+}
+
+
+// Helpers for base-36 sequences in deciseconds
+function decodeBase36Seq(s) { return String(s).split('.').filter(Boolean).map(t => { const v = parseInt(t, 36); return isFinite(v) && v >= 0 ? v : 0; }); }
+function encodeBase36Seq(arr) { return (arr || []).map(v => (v >= 0 ? v : 0).toString(36)).join('.'); }
+function reconstructTimesFromClocksDeci(baseDeci, incDeci, clocksDeci) {
+  const times = [];
+  let prev = [baseDeci || 0, baseDeci || 0];
+  for (let i = 0; i < clocksDeci.length; i++) {
+    const p = i % 2;
+    const t = (prev[p] - (clocksDeci[i] || 0) + (incDeci || 0));
+    times.push(t >= 0 ? t : 0);
+    prev[p] = clocksDeci[i] || 0;
+  }
+  return times;
+}
