@@ -265,7 +265,7 @@ function fetchCallbackLast50() { fetchCallbackLastN(50); }
 
 function fetchCallbackLastN(count) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
+  const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
   const callbackSheet = ss.getSheetByName(SHEETS.CALLBACK);
   
   if (!gamesSheet || !callbackSheet) {
@@ -294,40 +294,41 @@ function fetchCallbackLastN(count) {
 
 function getGamesWithoutCallback(maxCount) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
-  const data = gamesSheet.getDataRange().getValues();
+  const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
+  if (!derivedSheet) return [];
+  const data = derivedSheet.getDataRange().getValues();
   const games = [];
   
-  // Iterate from newest to oldest (reverse order)
+  // Iterate from newest to oldest (reverse order) using combined columns
+  // Combined columns: [0]=Game ID, [1]=Game URL, [5]=Start epoch, [6]=End epoch, [7]=Is Live, [8]=Time Class
+  // Callback tracking: add a 'Callback Fetched' boolean column at end if missing
+  const header = data[0] || [];
+  let cbCol = header.indexOf('Callback Fetched');
+  if (cbCol === -1) {
+    derivedSheet.insertColumnAfter(derivedSheet.getLastColumn());
+    cbCol = derivedSheet.getLastColumn() - 1;
+    derivedSheet.getRange(1, cbCol + 1).setValue('Callback Fetched')
+      .setFontWeight('bold')
+      .setBackground('#666666')
+      .setFontColor('#ffffff');
+  }
   for (let i = data.length - 1; i >= 1 && games.length < maxCount; i--) {
-    if (data[i][13] === false) { // Callback Fetched column (index 13)
-      const myColor = data[i][3];
-      const opponent = data[i][4];
-      const gameId = data[i][11];
-      
-      // Get time class from derived data
-      const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
-      let timeClass = '';
-      
-      if (derivedSheet) {
-        const derivedData = derivedSheet.getDataRange().getValues();
-        for (let j = 1; j < derivedData.length; j++) {
-          if (derivedData[j][0] === gameId) {
-            timeClass = derivedData[j][5];
-            break;
-          }
-        }
-      }
-      
-      games.push({
-        row: i + 1,
-        gameId: gameId,
-        gameUrl: data[i][0],
-        white: myColor === 'white' ? CONFIG.USERNAME : opponent,
-        black: myColor === 'black' ? CONFIG.USERNAME : opponent,
-        timeClass: timeClass
-      });
-    }
+    if (data[i][cbCol] === true) continue;
+    const gameId = data[i][0];
+    const timeClass = data[i][8];
+    const isLive = data[i][7];
+    const url = data[i][1];
+    const whiteUser = ''; // unknown without reading PGN here
+    const blackUser = '';
+    if (!gameId) continue;
+    games.push({
+      row: i + 1,
+      gameId: gameId,
+      gameUrl: url,
+      white: whiteUser,
+      black: blackUser,
+      timeClass: timeClass
+    });
   }
   
   return games.reverse(); // Return in chronological order (oldest first)
@@ -353,8 +354,18 @@ function fetchCallbackForGames(gamesToFetch) {
         saveCallbackData(callbackData);
         
         // Mark callback as fetched
-        if (game.row) {
-          gamesSheet.getRange(game.row, 14).setValue(true); // Callback Fetched column (index 14)
+        if (game.row && derivedSheet) {
+          const header = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
+          let cbCol = header.indexOf('Callback Fetched');
+          if (cbCol === -1) {
+            derivedSheet.insertColumnAfter(derivedSheet.getLastColumn());
+            cbCol = derivedSheet.getLastColumn() - 1;
+            derivedSheet.getRange(1, cbCol + 1).setValue('Callback Fetched')
+              .setFontWeight('bold')
+              .setBackground('#666666')
+              .setFontColor('#ffffff');
+          }
+          derivedSheet.getRange(game.row, cbCol + 1).setValue(true);
         }
         
         successCount++;
@@ -885,52 +896,7 @@ function getGameFormat(game) {
 
 // Remove duplicate games based on Game ID
 function removeDuplicates() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
-  
-  if (!gamesSheet) {
-    SpreadsheetApp.getUi().alert('❌ Games sheet not found!');
-    return;
-  }
-  
-  const data = gamesSheet.getDataRange().getValues();
-  const header = data[0];
-  const gameIdCol = 11; // Game ID column (index 11)
-  
-  const seen = new Set();
-  const rowsToKeep = [header];
-  let duplicateCount = 0;
-  
-  for (let i = 1; i < data.length; i++) {
-    const gameId = data[i][gameIdCol];
-    
-    if (!seen.has(gameId)) {
-      seen.add(gameId);
-      rowsToKeep.push(data[i]);
-    } else {
-      duplicateCount++;
-    }
-  }
-  
-  if (duplicateCount > 0) {
-    gamesSheet.clear();
-    gamesSheet.getRange(1, 1, rowsToKeep.length, rowsToKeep[0].length).setValues(rowsToKeep);
-    
-    gamesSheet.getRange(1, 1, 1, header.length)
-      .setFontWeight('bold')
-      .setBackground('#4285f4')
-      .setFontColor('#ffffff');
-    gamesSheet.setFrozenRows(1);
-    
-    SpreadsheetApp.getActiveSpreadsheet().toast(
-      `Removed ${duplicateCount} duplicate(s)`, 
-      '🗑️', 
-      3
-    );
-    Logger.log(`Removed ${duplicateCount} duplicates`);
-  } else {
-    SpreadsheetApp.getActiveSpreadsheet().toast('No duplicates found!', 'ℹ️', 2);
-  }
+  // No-op: legacy Games sheet duplicate removal removed
 }
 
 // ============================================
