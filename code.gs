@@ -394,9 +394,9 @@ function findGameRow(gameId) {
 function fetchAllGamesInitial() {
   const username = CONFIG.USERNAME;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
+  const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
   
-  if (!gamesSheet) {
+  if (!derivedSheet) {
     SpreadsheetApp.getUi().alert('❌ Please run "Setup Sheets" first!');
     return;
   }
@@ -446,12 +446,13 @@ function fetchAllGamesInitial() {
       Logger.log(`Archive ${i + 1}/${archives.length}: ${response.data?.games?.length || 0} games`);
     }
     
-    // Filter out duplicates before processing
+    // Filter out duplicates before processing (use Derived sheet Game ID)
     const existingGameIds = new Set();
-    if (gamesSheet.getLastRow() > 1) {
-      const existingData = gamesSheet.getDataRange().getValues();
+    if (derivedSheet.getLastRow() > 1) {
+      const existingData = derivedSheet.getDataRange().getValues();
+      // 'Game ID' is column 1 in combined sheet
       for (let i = 1; i < existingData.length; i++) {
-        existingGameIds.add(existingData[i][11]); // Game ID column (index 11)
+        existingGameIds.add(existingData[i][0]);
       }
     }
     
@@ -461,11 +462,9 @@ function fetchAllGamesInitial() {
     });
     
     ss.toast(`Processing ${newGames.length} games...`, '⏳', -1);
-    const rows = processGamesData(newGames, username);
+    const processedCount = processGamesData(newGames, username);
     
-    if (rows.length > 0) {
-      const lastRow = gamesSheet.getLastRow();
-      gamesSheet.getRange(lastRow + 1, 1, rows.length, rows[0].length).setValues(rows);
+    if (processedCount > 0) {
       
       // Find and store the most recent game URL (latest end_time)
       let mostRecentGame = newGames[0];
@@ -499,9 +498,9 @@ function fetchAllGamesInitial() {
 function fetchChesscomGames() {
   const username = CONFIG.USERNAME;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
+  const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
   
-  if (!gamesSheet) {
+  if (!derivedSheet) {
     SpreadsheetApp.getUi().alert('❌ Please run "Setup Sheets" first!');
     return;
   }
@@ -618,19 +617,13 @@ function fetchChesscomGames() {
     // Also skip any game older than or equal to last known by end_time if URL unknown
     const existingGameIds = new Set();
     let lastKnownEndTime = 0;
-    if (gamesSheet.getLastRow() > 1) {
-      const existingData = gamesSheet.getDataRange().getValues();
+    if (derivedSheet.getLastRow() > 1) {
+      const existingData = derivedSheet.getDataRange().getValues();
       for (let i = 1; i < existingData.length; i++) {
-        existingGameIds.add(existingData[i][11]); // Game ID column (index 11)
-        const endDate = existingData[i][1];
-        const endTime = existingData[i][2];
-        if (endDate instanceof Date && endTime instanceof Date) {
-          const ts = new Date(
-            endDate.getFullYear(), endDate.getMonth(), endDate.getDate(),
-            endTime.getHours(), endTime.getMinutes(), endTime.getSeconds()
-          ).getTime() / 1000;
-          if (ts > lastKnownEndTime) lastKnownEndTime = ts;
-        }
+        const gid = existingData[i][0]; // Game ID
+        const endEpoch = existingData[i][6]; // End (epoch s)
+        if (gid) existingGameIds.add(gid);
+        if (typeof endEpoch === 'number' && endEpoch > lastKnownEndTime) lastKnownEndTime = endEpoch;
       }
     }
 
@@ -647,11 +640,9 @@ function fetchChesscomGames() {
     }
     
     ss.toast(`Found ${newGames.length} new games. Processing...`, '⏳', -1);
-    const rows = processGamesData(newGames, username);
+    const processedCount = processGamesData(newGames, username);
     
-    if (rows.length > 0) {
-      const lastRow = gamesSheet.getLastRow();
-      gamesSheet.getRange(lastRow + 1, 1, rows.length, rows[0].length).setValues(rows);
+    if (processedCount > 0) {
       
       // Update last known game URL to the newest by end_time among all new and existing
       let mostRecentGame = newGames[0];
@@ -662,13 +653,13 @@ function fetchChesscomGames() {
       }
       props.setProperty('LAST_GAME_URL', mostRecentGame.url);
       
-      ss.toast(`✅ Added ${rows.length} new games!`, '✅', 5);
+      ss.toast(`✅ Added ${newGames.length} new games!`, '✅', 5);
       
       // Process auto-analysis and callback data for new games
       const gamesToProcess = newGames.map(g => {
         const gameId = g.url.split('/').pop();
         return {
-          row: findGameRow(gameId),
+          row: -1, // legacy Games sheet row no longer used
           gameId: gameId,
           gameUrl: g.url,
           white: g.white?.username || '',
@@ -677,7 +668,7 @@ function fetchChesscomGames() {
           outcome: getGameOutcome(g, CONFIG.USERNAME),
           pgn: g.pgn || ''
         };
-      }).filter(g => g.row > 0 && g.gameId && g.white && g.black);
+      }).filter(g => g.gameId && g.white && g.black);
       
       processNewGamesAutoFeatures(gamesToProcess);
       
@@ -775,37 +766,6 @@ function processGamesData(games, username) {
   const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
   let existingGames = [];
   
-  if (gamesSheet && gamesSheet.getLastRow() > 1) {
-    const data = gamesSheet.getDataRange().getValues();
-    // Build lookup map: format -> array of {timestamp, rating}
-    for (let i = 1; i < data.length; i++) {
-      try {
-        const format = data[i][7]; // Format column (index 7)
-        const endDate = data[i][1]; // End Date (Date object)
-        const endTime = data[i][2]; // End Time (Date object)
-        const myRating = data[i][8]; // My Rating column (index 8)
-        let timestamp = 0;
-        if (endDate instanceof Date && endTime instanceof Date) {
-          timestamp = new Date(
-            endDate.getFullYear(), endDate.getMonth(), endDate.getDate(),
-            endTime.getHours(), endTime.getMinutes(), endTime.getSeconds()
-          ).getTime() / 1000;
-        } else if (endDate instanceof Date) {
-          timestamp = Math.floor(endDate.getTime() / 1000);
-        }
-        
-        existingGames.push({
-          format: format,
-          timestamp: timestamp,
-          rating: myRating
-        });
-      } catch (error) {
-        // Skip malformed rows
-        continue;
-      }
-    }
-  }
-  
   for (const game of sortedGames) {
     try {
       if (!game || !game.url || !game.end_time) {
@@ -847,15 +807,7 @@ function processGamesData(games, username) {
       const endDateTime = new Date(endDate.getTime());
       const startDateTime = startDate ? new Date(startDate.getTime()) : (duration && duration > 0 ? new Date(endDateTime.getTime() - (duration * 1000)) : null);
       
-      // Fill legacy Games sheet row to preserve current flows
-      const endDateObj = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
-      const endTimeObj = new Date(1970, 0, 1, endDate.getHours(), endDate.getMinutes(), endDate.getSeconds());
-      rows.push([
-        game.url, endDateObj, endTimeObj, myColor, opponent || 'Unknown',
-        outcome, termination, format,
-        myRating || 'N/A', oppRating || 'N/A', lastRating || 'N/A',
-        gameId, false, false
-      ]);
+      // No longer writing legacy Games rows; combined output only
       
       // Calculate Moves (ply count / 2 rounded up)
       const movesCount = moveData.plyCount > 0 ? Math.ceil(moveData.plyCount / 2) : 0;
@@ -902,15 +854,14 @@ function processGamesData(games, username) {
     }
   }
   
-  // Write derived data to hidden sheet
+  // Write combined data to Derived sheet
   if (derivedSheet && derivedRows.length > 0) {
-    // Ensure DB columns exist before writing, to match value count
-    ensureDerivedDbColumns(derivedSheet);
     const lastRow = derivedSheet.getLastRow();
     derivedSheet.getRange(lastRow + 1, 1, derivedRows.length, derivedRows[0].length).setValues(derivedRows);
   }
   
-  return rows;
+  // Return count processed
+  return derivedRows.length;
 }
 
 function ensureDerivedDbColumns(_derivedSheet) { /* no-op: using minimal opening outputs inline */ }
