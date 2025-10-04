@@ -60,11 +60,9 @@ const OPENINGS_DB_HEADERS = [
   'Variation 1', 'Variation 2', 'Variation 3', 'Variation 4', 'Variation 5', 'Variation 6'
 ];
 
-// Columns to add to Derived Data for DB mapping
-const DERIVED_DB_HEADERS = [
-  'DB Full Name', 'DB Family', 'DB Base Name',
-  'DB Variation 1', 'DB Variation 2', 'DB Variation 3',
-  'DB Variation 4', 'DB Variation 5', 'DB Variation 6'
+// Minimal opening outputs to store in-sheet
+const DERIVED_OPENING_HEADERS = [
+  'Opening Name', 'Opening Family'
 ];
 
 // ============================================
@@ -79,6 +77,7 @@ function onOpen() {
     .addSeparator()
     .addItem('📋 Fetch Callback Last 10', 'fetchCallbackLast10')
     .addItem('🔗 Refresh Opening Mappings', 'refreshDerivedDbMappings')
+    .addItem('🧪 Enrich Move Times (Selection)', 'enrichMoveTimesForSelection')
     .addToUi();
 }
 
@@ -816,6 +815,7 @@ function processGamesData(games, username) {
       }
       
       const endDate = new Date(game.end_time * 1000);
+      const startDate = extractStartFromPGN(game.pgn) || null;
       const gameId = game.url.split('/').pop();
       const eco = extractECOFromPGN(game.pgn);
       const ecoUrl = extractECOUrlFromPGN(game.pgn);
@@ -850,70 +850,45 @@ function processGamesData(games, username) {
       // Parse time control
       const tcParsed = parseTimeControl(game.time_control, game.time_class);
       
-      // Extract moves with clocks and times
+      // Extract compact move data
+      const tcn = game.tcn || extractTCNFromPGN(game.pgn) || '';
       const moveData = extractMovesWithClocks(game.pgn, tcParsed.baseTime, tcParsed.increment);
+      const mc36 = encodeClocksBase36(moveData.clocks);
       
-      // Create proper date/time objects
-      // End Date: Set to midnight of the game's date (no time component)
-      const endDateObj = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
-      
-      // End Time: Create a date with just time component (use epoch date + time)
-      const endTimeObj = new Date(1970, 0, 1, endDate.getHours(), endDate.getMinutes(), endDate.getSeconds());
-      
-      // Combined End DateTime for derived sheet
+      // Combined Start/End datetimes
       const endDateTime = new Date(endDate.getTime());
+      const startDateTime = startDate ? new Date(startDate.getTime()) : (duration && duration > 0 ? new Date(endDateTime.getTime() - (duration * 1000)) : null);
       
-      // Calculate start time from duration
-      let startDateTime = null;
-      let startDateObj = null;
-      let startTimeObj = null;
-      
-      if (duration && duration > 0) {
-        startDateTime = new Date(endDateTime.getTime() - (duration * 1000));
-        startDateObj = new Date(startDateTime.getFullYear(), startDateTime.getMonth(), startDateTime.getDate());
-        startTimeObj = new Date(1970, 0, 1, startDateTime.getHours(), startDateTime.getMinutes(), startDateTime.getSeconds());
-      }
-      
-      rows.push([
-        game.url, endDateObj, endTimeObj, myColor, opponent || 'Unknown',
-        outcome, termination, format,
-        myRating || 'N/A', oppRating || 'N/A', lastRating || 'N/A',
-        gameId, false, false
-      ]);
+      // Games sheet rows are unchanged here (legacy); combined output is in derivedRows
       
       // Calculate Moves (ply count / 2 rounded up)
       const movesCount = moveData.plyCount > 0 ? Math.ceil(moveData.plyCount / 2) : 0;
       
-      // Store derived data in hidden sheet
-      const dbValues = getDbMappingValues(ecoSlug);
-
+      // Store combined lean data in derived sheet
+      const dbValues = getOpeningOutputs(ecoSlug);
       derivedRows.push([
         gameId,
-        game.white?.username || 'Unknown',
-        game.black?.username || 'Unknown',
-        game.white?.rating || 'N/A',
-        game.black?.rating || 'N/A',
+        game.url,
+        startDateTime,
+        endDateTime,
+        duration || null,
+        timeClass.toLowerCase() !== 'daily',
         timeClass,
-        game.time_control || '',
-        tcParsed.type,
         tcParsed.baseTime,
         tcParsed.increment,
-        tcParsed.correspondenceTime,
+        isWhite,
+        opponent || 'Unknown',
+        myRating || 'N/A',
+        oppRating || 'N/A',
+        outcome,
+        termination,
         eco,
-        ecoUrl,
-        ecoSlug,
-        game.rated !== undefined ? game.rated : true,
-        endDateTime,
-        startDateTime,
-        startDateObj,
-        startTimeObj,
-        duration,
+        dbValues[0], // Opening Name
+        dbValues[1], // Opening Family
         moveData.plyCount,
         movesCount,
-        moveData.moveList,
-        moveData.clocks,
-        moveData.times,
-        ...dbValues
+        tcn,
+        mc36
       ]);
       
       // Add this game to existingGames for subsequent games in this batch
@@ -1206,6 +1181,50 @@ function getDbMappingValues(ecoSlug) {
   return empty;
 }
 
+// Minimal opening outputs: [Opening Name, Opening Family]
+function getOpeningOutputs(ecoSlug) {
+  const db = loadOpeningsDbCache();
+  if (!ecoSlug) return ['', ''];
+  const keys = [ecoSlug, normalizeSlugForDb(ecoSlug), ecoSlug.split('-with-')[0] || '', normalizeSlugForDb(ecoSlug).split('-with-')[0] || ''];
+  for (const k of keys) {
+    if (k && db.has(k)) {
+      const row = db.get(k);
+      return [row[0] || '', row[2] || '']; // Full Name, Family
+    }
+  }
+  return ['', ''];
+}
+
+// Extract start datetime from PGN headers if available
+function extractStartFromPGN(pgn) {
+  if (!pgn) return null;
+  const dateMatch = pgn.match(/\[UTCDate "([^"]+)"\]/);
+  const timeMatch = pgn.match(/\[UTCTime "([^"]+)"\]/);
+  if (!dateMatch || !timeMatch) return null;
+  try {
+    const d = dateMatch[1].split('.');
+    const t = timeMatch[1].split(':');
+    return new Date(Date.UTC(parseInt(d[0]), parseInt(d[1]) - 1, parseInt(d[2]), parseInt(t[0]), parseInt(t[1]), parseInt(t[2])));
+  } catch (e) {
+    return null;
+  }
+}
+
+// Try to extract a TCN-like move list from PGN (fallback)
+function extractTCNFromPGN(_pgn) { return ''; }
+
+// Encode clocks (seconds) to base36 deciseconds dot-joined
+function encodeClocksBase36(clocksCsv) {
+  if (!clocksCsv) return '';
+  const parts = String(clocksCsv).split(',').map(s => s.trim()).filter(Boolean);
+  if (parts.length === 0) return '';
+  return parts.map(p => {
+    const ds = Math.round(parseFloat(p) * 10);
+    const val = isFinite(ds) && ds >= 0 ? ds : 0;
+    return val.toString(36);
+  }).join('.');
+}
+
 // Extract moves with clock times from PGN
 function extractMovesWithClocks(pgn, baseTime, increment) {
   if (!pgn) return { moves: [], clocks: [], times: [] };
@@ -1241,9 +1260,8 @@ function extractMovesWithClocks(pgn, baseTime, increment) {
     
     // Time spent = previous clock - current clock + increment
     let timeSpent = prevPlayerClock - clockSeconds + (increment || 0);
-    
-    // Minimum move time is 0.1 seconds (Chess.com enforces this)
-    if (timeSpent < 0.1) timeSpent = 0.1;
+    // Allow 0.0 seconds moves (e.g., premove)
+    if (timeSpent < 0) timeSpent = 0;
     
     times.push(Math.round(timeSpent * 10) / 10); // Round to 1 decimal
     
@@ -1369,12 +1387,16 @@ function setupSheets() {
   if (!derivedSheet) {
     derivedSheet = ss.insertSheet(SHEETS.DERIVED);
     const headers = [
-      'Game ID', 'White Username', 'Black Username', 'White Rating', 'Black Rating',
-      'Time Class', 'Time Control', 'Type', 'Base Time', 'Increment', 'Correspondence Time',
-      'ECO', 'ECO URL', 'ECO Slug', 'Rated',
-      'End', 'Start', 'Start Date', 'Start Time', 'Duration (s)', 'Ply Count', 'Moves',
-      'Move List', 'Move Clocks', 'Move Times',
-      ...DERIVED_DB_HEADERS
+      // Combined lean schema
+      'Game ID', 'Game URL',
+      'Start', 'End', 'Duration (s)',
+      'Is Live', 'Time Class', 'Base Time (s)', 'Increment (s)',
+      'Is White', 'Opponent', 'My Rating', 'Opp Rating',
+      'Outcome', 'Termination',
+      'ECO', 'Opening Name', 'Opening Family',
+      'Ply Count', 'Moves',
+      // Compact detail
+      'tcn', 'mc36'
     ];
     derivedSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
     derivedSheet.getRange(1, 1, 1, headers.length)
@@ -1383,48 +1405,16 @@ function setupSheets() {
       .setFontColor('#ffffff');
     derivedSheet.setFrozenRows(1);
     
-    // Format date/time columns
-    derivedSheet.getRange('P:P').setNumberFormat('m"/"d"/"yy h:mm AM/PM'); // End
-    derivedSheet.getRange('Q:Q').setNumberFormat('m"/"d"/"yy h:mm AM/PM'); // Start
-    derivedSheet.getRange('R:R').setNumberFormat('m"/"d"/"yy'); // Start Date
-    derivedSheet.getRange('S:S').setNumberFormat('h:mm AM/PM'); // Start Time
-    
-    // Format Move Clocks and Move Times columns as text
-    // Note: these column letters assume no extra columns before them.
-    const moveListCol = 23; // W
-    const moveClocksCol = 24; // X
-    const moveTimesCol = 25; // Y
-    derivedSheet.getRange(1, moveListCol, derivedSheet.getMaxRows(), 1).setNumberFormat('@STRING@');
-    derivedSheet.getRange(1, moveClocksCol, derivedSheet.getMaxRows(), 1).setNumberFormat('@STRING@');
-    derivedSheet.getRange(1, moveTimesCol, derivedSheet.getMaxRows(), 1).setNumberFormat('@STRING@');
+    // Format datetime columns
+    const startCol = 3;
+    const endCol = 4;
+    derivedSheet.getRange(1, startCol, derivedSheet.getMaxRows(), 1).setNumberFormat('m"/"d"/"yy h:mm AM/PM');
+    derivedSheet.getRange(1, endCol, derivedSheet.getMaxRows(), 1).setNumberFormat('m"/"d"/"yy h:mm AM/PM');
     
     // Hide the derived sheet
     derivedSheet.hideSheet();
   } else {
-    // If sheet exists, add ECO Slug column if not present
-    const headers = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
-    if (!headers.includes('ECO Slug')) {
-      // Insert new column after ECO URL (column 13)
-      derivedSheet.insertColumnAfter(13);
-      derivedSheet.getRange(1, 14).setValue('ECO Slug')
-        .setFontWeight('bold')
-        .setBackground('#666666')
-        .setFontColor('#ffffff');
-    }
-
-    // Ensure DB mapping columns exist (append missing at the end to avoid index shifts)
-    let currentHeaders = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
-    for (const header of DERIVED_DB_HEADERS) {
-      currentHeaders = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
-      if (!currentHeaders.includes(header)) {
-        derivedSheet.insertColumnAfter(derivedSheet.getLastColumn());
-        const col = derivedSheet.getLastColumn();
-        derivedSheet.getRange(1, col).setValue(header)
-          .setFontWeight('bold')
-          .setBackground('#666666')
-          .setFontColor('#ffffff');
-      }
-    }
+    // If a legacy sheet exists, we won't auto-migrate columns here.
   }
 
   
