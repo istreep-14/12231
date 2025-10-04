@@ -859,7 +859,15 @@ function processGamesData(games, username) {
       const endDateTime = new Date(endDate.getTime());
       const startDateTime = startDate ? new Date(startDate.getTime()) : (duration && duration > 0 ? new Date(endDateTime.getTime() - (duration * 1000)) : null);
       
-      // Games sheet rows are unchanged here (legacy); combined output is in derivedRows
+      // Fill legacy Games sheet row to preserve current flows
+      const endDateObj = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
+      const endTimeObj = new Date(1970, 0, 1, endDate.getHours(), endDate.getMinutes(), endDate.getSeconds());
+      rows.push([
+        game.url, endDateObj, endTimeObj, myColor, opponent || 'Unknown',
+        outcome, termination, format,
+        myRating || 'N/A', oppRating || 'N/A', lastRating || 'N/A',
+        gameId, false, false
+      ]);
       
       // Calculate Moves (ply count / 2 rounded up)
       const movesCount = moveData.plyCount > 0 ? Math.ceil(moveData.plyCount / 2) : 0;
