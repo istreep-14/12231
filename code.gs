@@ -406,7 +406,7 @@ function findGameRow(gameId) {
 function fetchAllGamesInitial() {
   const username = CONFIG.USERNAME;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   
   if (!derivedSheet) {
     SpreadsheetApp.getUi().alert('❌ Please run "Setup Sheets" first!');
@@ -774,8 +774,7 @@ function processGamesData(games, username) {
   
   // Pre-load existing games data once for performance
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
-  const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   let existingGames = [];
   
   for (const game of sortedGames) {
