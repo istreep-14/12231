@@ -77,7 +77,6 @@ function onOpen() {
     .addSeparator()
     .addItem('📋 Fetch Callback Last 10', 'fetchCallbackLast10')
     .addItem('🔗 Refresh Opening Mappings', 'refreshDerivedDbMappings')
-    .addItem('🧪 Enrich Move Times (Selection)', 'enrichMoveTimesForSelection')
     .addToUi();
 }
 
