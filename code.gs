@@ -1536,3 +1536,89 @@ function refreshDerivedDbMappings() {
   derivedSheet.getRange(2, startDbCol, writeRows.length, DERIVED_DB_HEADERS.length).setValues(writeRows);
   SpreadsheetApp.getUi().alert('✅ Opening mappings refreshed');
 }
+
+// ============================================
+// ENRICHMENT: Reconstruct Move Times for selection
+// ============================================
+function enrichMoveTimesForSelection() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEETS.DERIVED);
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert('Derived Data sheet not found');
+    return;
+  }
+  const range = ss.getActiveRange();
+  if (!range || range.getSheet().getName() !== SHEETS.DERIVED) {
+    SpreadsheetApp.getUi().alert('Select rows in Derived Data to enrich.');
+    return;
+  }
+  let startRow = range.getRow();
+  let numRows = range.getNumRows();
+  if (startRow === 1) {
+    startRow = 2; // skip header
+    numRows = Math.max(0, (range.getRow() + range.getNumRows() - 1) - 1);
+  }
+  if (numRows <= 0) return;
+
+  const lastCol = sheet.getLastColumn();
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+
+  const colIsLive = headers.indexOf('Is Live') + 1;
+  const colBase = headers.indexOf('Base Time (s)') + 1;
+  const colInc = headers.indexOf('Increment (s)') + 1;
+  const colMc36 = headers.indexOf('mc36') + 1;
+  if (colIsLive <= 0 || colBase <= 0 || colInc <= 0 || colMc36 <= 0) {
+    SpreadsheetApp.getUi().alert('Missing required columns (Is Live, Base Time (s), Increment (s), mc36).');
+    return;
+  }
+
+  // Ensure mt36 column exists (encoded move times, deciseconds base-36)
+  let colMt36 = headers.indexOf('mt36') + 1;
+  if (colMt36 <= 0) {
+    sheet.insertColumnAfter(colMc36);
+    colMt36 = colMc36 + 1;
+    sheet.getRange(1, colMt36).setValue('mt36')
+      .setFontWeight('bold')
+      .setBackground('#666666')
+      .setFontColor('#ffffff');
+  }
+
+  const data = sheet.getRange(startRow, 1, numRows, lastCol).getValues();
+  const out = new Array(numRows).fill('').map(() => ['']);
+
+  for (let r = 0; r < data.length; r++) {
+    try {
+      const row = data[r];
+      const isLive = row[colIsLive - 1] === true || String(row[colIsLive - 1]).toLowerCase() === 'true';
+      const baseSec = parseFloat(row[colBase - 1]) || 0;
+      const incSec = parseFloat(row[colInc - 1]) || 0;
+      const mc36 = String(row[colMc36 - 1] || '');
+      if (!isLive || !mc36) { out[r][0] = ''; continue; }
+      const clocksDeci = decodeBase36Seq(mc36);
+      const baseDeci = Math.round(baseSec * 10);
+      const incDeci = Math.round(incSec * 10);
+      const timesDeci = reconstructTimesFromClocksDeci(baseDeci, incDeci, clocksDeci);
+      out[r][0] = encodeBase36Seq(timesDeci);
+    } catch (e) {
+      out[r][0] = '';
+    }
+  }
+
+  sheet.getRange(startRow, colMt36, numRows, 1).setValues(out);
+  ss.toast('Move Times (mt36) enriched for selection', '🧪', 3);
+}
+
+// Helpers for base-36 sequences in deciseconds
+function decodeBase36Seq(s) { return String(s).split('.').filter(Boolean).map(t => { const v = parseInt(t, 36); return isFinite(v) && v >= 0 ? v : 0; }); }
+function encodeBase36Seq(arr) { return (arr || []).map(v => (v >= 0 ? v : 0).toString(36)).join('.'); }
+function reconstructTimesFromClocksDeci(baseDeci, incDeci, clocksDeci) {
+  const times = [];
+  let prev = [baseDeci || 0, baseDeci || 0];
+  for (let i = 0; i < clocksDeci.length; i++) {
+    const p = i % 2;
+    const t = (prev[p] - (clocksDeci[i] || 0) + (incDeci || 0));
+    times.push(t >= 0 ? t : 0);
+    prev[p] = clocksDeci[i] || 0;
+  }
+  return times;
+}
