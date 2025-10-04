@@ -620,10 +620,14 @@ function fetchCallbackForGames(gamesToFetch) {
 function findGameRow(gameId) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
+  if (!gamesSheet) return -1;
   const data = gamesSheet.getDataRange().getValues();
-  
+  if (data.length < 2) return -1;
+  const header = data[0];
+  const idCol = header.indexOf('Game ID');
+  if (idCol < 0) return -1;
   for (let i = 1; i < data.length; i++) {
-    if (data[i][11] === gameId) { // Game ID column (index 11)
+    if (String(data[i][idCol]) === String(gameId)) {
       return i + 1;
     }
   }
