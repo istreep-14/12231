@@ -1,3 +1,33 @@
+// Initial build of Daily Stats from all existing Games
+function buildDailyStatsInitial() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const games = ss.getSheetByName(SHEETS.GAMES);
+  const stats = ss.getSheetByName('Daily Stats');
+  if (!games || !stats) { SpreadsheetApp.getUi().alert('Run Setup Sheets first'); return; }
+
+  const gVals = games.getDataRange().getValues();
+  if (gVals.length < 2) return;
+  const gh = gVals[0];
+  const idx = (name) => gh.indexOf(name);
+  const iDate = idx('Date');
+  const iEnd = idx('End');
+  const iFormat = idx('Format');
+  const iIsLive = idx('Is Live');
+  const iOutcome = idx('Outcome');
+  const iMyRating = idx('My Rating');
+  const iOppRating = idx('Opp Rating');
+  const iStart = idx('Start');
+  const iDelta = idx('Delta');
+  if ([iDate, iEnd, iFormat, iIsLive, iOutcome, iMyRating, iOppRating, iStart, iDelta].some(v => v < 0)) return;
+
+  // Reset Daily Stats (keep header)
+  if (stats.getLastRow() > 1) stats.getRange(2,1,stats.getLastRow()-1,stats.getLastColumn()).clearContent();
+
+  // Accumulate all games
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty('LAST_STATS_END', '0');
+  updateDailyStatsIncremental();
+}
 // Build Daily Stats headers (Date + Core, All, and per-format blocks)
 function buildDailyStatsHeaders() {
   const h = ['Date'];
