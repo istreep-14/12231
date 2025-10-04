@@ -8,11 +8,12 @@ const CONFIG = {
 };
 
 const SHEETS = {
+  // Combined sheet is the canonical games table
   GAMES: 'Games',
   ANALYSIS: 'Analysis',
   CALLBACK: 'Callback',
-  DERIVED: 'Derived Data',
-  OPENINGS_DB: 'Openings DB' // TSV-backed openings database (Name, Trim Slug, Family, Name, Variation1..6)
+  DERIVED: 'Games', // alias kept for compatibility
+  OPENINGS_DB: 'Openings DB'
 };
 
 // Result to outcome mapping
@@ -265,7 +266,7 @@ function fetchCallbackLast50() { fetchCallbackLastN(50); }
 
 function fetchCallbackLastN(count) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   const callbackSheet = ss.getSheetByName(SHEETS.CALLBACK);
   
   if (!gamesSheet || !callbackSheet) {
@@ -294,7 +295,7 @@ function fetchCallbackLastN(count) {
 
 function getGamesWithoutCallback(maxCount) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   if (!derivedSheet) return [];
   const data = derivedSheet.getDataRange().getValues();
   const games = [];
@@ -509,7 +510,7 @@ function fetchAllGamesInitial() {
 function fetchChesscomGames() {
   const username = CONFIG.USERNAME;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   
   if (!derivedSheet) {
     SpreadsheetApp.getUi().alert('❌ Please run "Setup Sheets" first!');
@@ -632,7 +633,7 @@ function fetchChesscomGames() {
       const existingData = derivedSheet.getDataRange().getValues();
       for (let i = 1; i < existingData.length; i++) {
         const gid = existingData[i][0]; // Game ID
-        const endEpoch = existingData[i][6]; // End (epoch s)
+        const endEpoch = existingData[i][2]; // End (epoch s)
         if (gid) existingGameIds.add(gid);
         if (typeof endEpoch === 'number' && endEpoch > lastKnownEndTime) lastKnownEndTime = endEpoch;
       }
@@ -825,10 +826,27 @@ function processGamesData(games, username) {
       
       // Store combined lean data in derived sheet
       const dbValues = getOpeningOutputs(ecoSlug);
+      const startEpoch = startDateTime ? Math.floor(startDateTime.getTime() / 1000) : null;
+      const endEpoch = Math.floor(endDateTime.getTime() / 1000);
+      const endLocalEpoch = endEpoch; // Store UTC epoch; convert to local in formulas if needed
+      const endLocalYmd = (() => {
+        const d = new Date(endDateTime);
+        return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+      })();
+
+      // Archive tag (MM/YY) from end UTC
+      const archiveTag = (() => {
+        const d = new Date(endDateTime);
+        return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getFullYear()).slice(-2)}`;
+      })();
+
       derivedRows.push([
         gameId,
-        startDateTime ? Math.floor(startDateTime.getTime() / 1000) : null,
-        Math.floor(endDateTime.getTime() / 1000),
+        startEpoch,
+        endEpoch,
+        endLocalEpoch,
+        endLocalYmd,
+        archiveTag,
         timeClass.toLowerCase() !== 'daily',
         timeClass,
         tcParsed.baseTime,
@@ -1279,13 +1297,13 @@ function setupSheets() {
     gamesSheet.getRange('C:C').setNumberFormat('h:mm AM/PM');
   }
   
-  let derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
+  let derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   if (!derivedSheet) {
-    derivedSheet = ss.insertSheet(SHEETS.DERIVED);
+    derivedSheet = ss.insertSheet(SHEETS.GAMES);
     const headers = [
       // Combined lean schema
       'Game ID',
-      'Start (epoch s)', 'End (epoch s)',
+      'Start (epoch s)', 'End (epoch s)', 'End (local epoch s)', 'End Local Date (yyyymmdd)', 'Archive (MM/YY)',
       'Is Live', 'Time Class', 'Base Time (s)', 'Increment (s)', 'Correspondence Time (s)',
       'Is White', 'Opponent', 'My Rating', 'Opp Rating',
       'Outcome', 'Termination',
@@ -1303,8 +1321,7 @@ function setupSheets() {
     
     // No formatted datetime columns in combined sheet
     
-    // Hide the derived sheet
-    derivedSheet.hideSheet();
+    // Keep Games visible
   } else {
     // If a legacy sheet exists, we won't auto-migrate columns here.
   }
@@ -1338,6 +1355,19 @@ function setupSheets() {
     callbackSheet.setFrozenRows(1);
     
     callbackSheet.getRange('K:K').setNumberFormat('@STRING@');
+  }
+
+  // Ensure Games (Archive) sheet exists with identical headers
+  let gamesArchive = ss.getSheetByName('Games (Archive)');
+  if (!gamesArchive) {
+    gamesArchive = ss.insertSheet('Games (Archive)');
+    gamesArchive.getRange(1, 1, 1, headers.length).setValues([headers]);
+    gamesArchive.getRange(1, 1, 1, headers.length)
+      .setFontWeight('bold')
+      .setBackground('#666666')
+      .setFontColor('#ffffff');
+    gamesArchive.setFrozenRows(1);
+    gamesArchive.hideSheet();
   }
 
   // Ensure Openings DB sheet exists with headers for paste/import
