@@ -78,6 +78,7 @@ function onOpen() {
     .addItem('📋 Fetch Callback Last 10', 'fetchCallbackLast10')
     .addItem('🔗 Refresh Opening Mappings', 'refreshDerivedDbMappings')
     .addItem('🧪 Enrich Move Times (Selection)', 'enrichMoveTimesForSelection')
+    .addItem('🧪 Validate Times (Selection)', 'validateTimesForSelection')
     .addToUi();
 }
 
@@ -1606,6 +1607,118 @@ function enrichMoveTimesForSelection() {
 
   sheet.getRange(startRow, colMt36, numRows, 1).setValues(out);
   ss.toast('Move Times (mt36) enriched for selection', '🧪', 3);
+}
+
+// ============================================
+// VALIDATION: Compare callback moveTimestamps vs PGN-derived times vs Duration
+// ============================================
+function validateTimesForSelection() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEETS.DERIVED);
+  if (!sheet) { SpreadsheetApp.getUi().alert('Derived Data sheet not found'); return; }
+  const range = ss.getActiveRange();
+  if (!range || range.getSheet().getName() !== SHEETS.DERIVED) {
+    SpreadsheetApp.getUi().alert('Select rows in Derived Data to validate.');
+    return;
+  }
+  let startRow = range.getRow();
+  let numRows = range.getNumRows();
+  if (startRow === 1) { startRow = 2; numRows = Math.max(0, (range.getRow() + range.getNumRows() - 1) - 1); }
+  if (numRows <= 0) return;
+
+  const lastCol = sheet.getLastColumn();
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  const colGameId = headers.indexOf('Game ID') + 1;
+  const colDuration = headers.indexOf('Duration (s)') + 1;
+  const colIsLive = headers.indexOf('Is Live') + 1;
+  const colBase = headers.indexOf('Base Time (s)') + 1;
+  const colInc = headers.indexOf('Increment (s)') + 1;
+  const colMc36 = headers.indexOf('mc36') + 1;
+  if ([colGameId, colDuration, colIsLive, colBase, colInc].some(c => c <= 0)) {
+    SpreadsheetApp.getUi().alert('Missing required columns (Game ID, Duration (s), Is Live, Base Time (s), Increment (s)).');
+    return;
+  }
+
+  // Prepare a results sheet
+  const resultName = 'Time Validation';
+  let outSheet = ss.getSheetByName(resultName) || ss.insertSheet(resultName);
+  outSheet.clear();
+  outSheet.getRange(1, 1, 1, 9).setValues([[
+    'Game ID', 'Is Live', 'Duration (s)',
+    'Sum Callback Clocks (s)', 'Sum PGN Times (s)',
+    'Delta Callback-Duration (s)', 'Delta PGN-Duration (s)',
+    'Callback Rows', 'Notes'
+  ]]);
+  outSheet.setFrozenRows(1);
+
+  const derivedData = sheet.getRange(startRow, 1, numRows, lastCol).getValues();
+  const callbackSheet = ss.getSheetByName(SHEETS.CALLBACK);
+  let callbackIndex = null;
+  if (callbackSheet) {
+    const cHead = callbackSheet.getRange(1, 1, 1, callbackSheet.getLastColumn()).getValues()[0];
+    callbackIndex = {
+      gameId: cHead.indexOf('Game ID'),
+      moveTs: cHead.indexOf('Move Timestamps'),
+      base: cHead.indexOf('Base Time'),
+      inc: cHead.indexOf('Time Increment')
+    };
+  }
+
+  const outRows = [];
+  for (const row of derivedData) {
+    const gameId = row[colGameId - 1];
+    const duration = parseFloat(row[colDuration - 1]) || 0;
+    const isLive = String(row[colIsLive - 1]).toLowerCase() === 'true';
+    const baseSec = parseFloat(row[colBase - 1]) || 0;
+    const incSec = parseFloat(row[colInc - 1]) || 0;
+    let sumCallbackSec = null;
+    let cbRows = 0;
+    if (callbackSheet && callbackIndex && callbackIndex.gameId >= 0) {
+      const cData = callbackSheet.getDataRange().getValues();
+      let found = false;
+      for (let i = 1; i < cData.length; i++) {
+        if (String(cData[i][callbackIndex.gameId]) === String(gameId)) {
+          cbRows++;
+          const ts = String(cData[i][callbackIndex.moveTs] || '');
+          if (ts) {
+            const arr = ts.split(',').map(s => parseInt(String(s).trim(), 10)).filter(n => isFinite(n) && n >= 0);
+            if (arr.length > 0) {
+              sumCallbackSec = arr[arr.length - 1] / 10; // last clock snapshot in deci → seconds
+              found = true;
+            }
+          }
+        }
+      }
+      if (!found) sumCallbackSec = null;
+    }
+
+    // Recompute PGN-derived times and sum
+    let sumPgnSec = null;
+    if (isLive) {
+      const mc36 = colMc36 > 0 ? String(row[colMc36 - 1] || '') : '';
+      if (mc36) {
+        const clocksDeci = decodeBase36Seq(mc36);
+        const baseDeci = Math.round(baseSec * 10);
+        const incDeci = Math.round(incSec * 10);
+        const timesDeci = reconstructTimesFromClocksDeci(baseDeci, incDeci, clocksDeci);
+        sumPgnSec = (timesDeci.reduce((a, b) => a + b, 0)) / 10;
+      }
+    }
+
+    const deltaCb = sumCallbackSec != null ? (sumCallbackSec - duration) : null;
+    const deltaPgn = sumPgnSec != null ? (sumPgnSec - duration) : null;
+    outRows.push([
+      gameId, isLive, duration,
+      sumCallbackSec, sumPgnSec,
+      deltaCb, deltaPgn,
+      cbRows, (sumCallbackSec == null && sumPgnSec == null) ? 'No data' : ''
+    ]);
+  }
+
+  if (outRows.length > 0) {
+    outSheet.getRange(2, 1, outRows.length, outRows[0].length).setValues(outRows);
+  }
+  ss.toast('Validation written to "Time Validation" sheet', '🧪', 4);
 }
 
 // Helpers for base-36 sequences in deciseconds
