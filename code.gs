@@ -1,10 +1,207 @@
+// Build Daily Stats headers (Date + Core, All, and per-format blocks)
+function buildDailyStatsHeaders() {
+  const h = ['Date'];
+  const addBlock = (prefix) => {
+    h.push(
+      `${prefix}_G`, `${prefix}_W`, `${prefix}_D`, `${prefix}_L`,
+      `${prefix}_WinPct`, `${prefix}_Dur`, `${prefix}_DurF`,
+      `${prefix}_AvgOpp`, `${prefix}_Perf`,
+      `${prefix}_R`, `${prefix}_ΔR`
+    );
+  };
+  addBlock('Core');
+  addBlock('All');
+  for (const fmt of FORMAT_SHORT_ORDER) addBlock(fmt);
+  return h;
+}
+
+// Group/hide heavy columns in Daily Stats
+function groupAndFormatDailyStats(sheet, headers) {
+  // Hide AvgOpp and Perf columns by default; format DurF
+  const lastCol = headers.length;
+  // Find column indices for *_AvgOpp and *_Perf and hide
+  for (let c = 1; c <= lastCol; c++) {
+    const name = headers[c - 1];
+    if (name.endsWith('_AvgOpp') || name.endsWith('_Perf')) {
+      sheet.hideColumns(c);
+    }
+    if (name.endsWith('_DurF')) {
+      sheet.getRange(2, c, sheet.getMaxRows() - 1, 1).setNumberFormat('[h]:mm:ss');
+    }
+  }
+}
+
+// Incremental update of Daily Stats based on new Games rows only
+function updateDailyStatsIncremental() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const games = ss.getSheetByName(SHEETS.GAMES);
+  const stats = ss.getSheetByName('Daily Stats');
+  if (!games || !stats) return;
+
+  const props = PropertiesService.getScriptProperties();
+  const lastEndStr = props.getProperty('LAST_STATS_END') || '0';
+  const lastEnd = parseInt(lastEndStr, 10) || 0;
+
+  const gVals = games.getDataRange().getValues();
+  if (gVals.length < 2) return;
+  const gh = gVals[0];
+  const idx = (name) => gh.indexOf(name);
+  const iDate = idx('Date');
+  const iEnd = idx('End');
+  const iFormat = idx('Format');
+  const iIsLive = idx('Is Live');
+  const iOutcome = idx('Outcome');
+  const iMyRating = idx('My Rating');
+  const iOppRating = idx('Opp Rating');
+  const iStart = idx('Start');
+  const iDelta = idx('Delta');
+  if ([iDate, iEnd, iFormat, iIsLive, iOutcome, iMyRating, iOppRating, iStart, iDelta].some(v => v < 0)) return;
+
+  // Accumulators: date -> aggregate, and per-format map
+  const byDate = new Map();
+  function getAgg(date) {
+    if (!byDate.has(date)) {
+      const agg = {
+        All: {G:0,W:0,D:0,L:0,Dur:0,OppSum:0,OppCnt:0,DeltaR:0},
+        Core: {G:0,W:0,D:0,L:0,Dur:0,OppSum:0,OppCnt:0,DeltaR:0},
+        fmt: new Map(),
+        lastRatings: new Map()
+      };
+      for (const f of FORMAT_SHORT_ORDER) agg.fmt.set(f, {G:0,W:0,D:0,L:0,Dur:0,OppSum:0,OppCnt:0,DeltaR:0, R:null});
+      byDate.set(date, agg);
+    }
+    return byDate.get(date);
+  }
+
+  // Process only new games (End > LAST_STATS_END)
+  for (let r = 1; r < gVals.length; r++) {
+    const row = gVals[r];
+    const end = row[iEnd];
+    if (typeof end !== 'number' || end <= lastEnd) continue;
+    const date = row[iDate];
+    const fmtShort = mapFormatToShort(row[iFormat]);
+    const isCore = (fmtShort === 'Bul' || fmtShort === 'Blz' || fmtShort === 'Rap');
+    const isLive = String(row[iIsLive]).toLowerCase() === 'true';
+    const outcome = String(row[iOutcome] || '');
+    const myR = typeof row[iMyRating] === 'number' ? row[iMyRating] : null;
+    const oppR = typeof row[iOppRating] === 'number' ? row[iOppRating] : null;
+    const start = row[iStart];
+    const delta = typeof row[iDelta] === 'number' ? row[iDelta] : 0;
+    const dur = (isLive && typeof end === 'number' && typeof start === 'number') ? Math.max(0, end - start) : 0;
+
+    const agg = getAgg(date);
+    const aAll = agg.All;
+    const aCore = agg.Core;
+    const aFmt = agg.fmt.get(fmtShort) || {G:0,W:0,D:0,L:0,Dur:0,OppSum:0,OppCnt:0,DeltaR:0, R:null};
+
+    // Outcomes
+    let w=0,d=0,l=0;
+    if (outcome === 'Win') w=1; else if (outcome === 'Draw') d=1; else if (outcome === 'Loss') l=1;
+
+    // Update All
+    aAll.G++; aAll.W+=w; aAll.D+=d; aAll.L+=l; aAll.Dur+=dur; aAll.DeltaR+=delta; if (typeof oppR==='number'){aAll.OppSum+=oppR; aAll.OppCnt++;}
+    // Update Core
+    if (isCore) { aCore.G++; aCore.W+=w; aCore.D+=d; aCore.L+=l; aCore.Dur+=dur; aCore.DeltaR+=delta; if (typeof oppR==='number'){aCore.OppSum+=oppR; aCore.OppCnt++;} }
+    // Update Format
+    aFmt.G++; aFmt.W+=w; aFmt.D+=d; aFmt.L+=l; aFmt.Dur+=dur; aFmt.DeltaR+=delta; if (typeof oppR==='number'){aFmt.OppSum+=oppR; aFmt.OppCnt++;}
+    if (typeof myR==='number') aFmt.R = myR; // end-of-day rating (last write wins by End order)
+    agg.fmt.set(fmtShort, aFmt);
+  }
+
+  // Build row index for stats (Date -> row)
+  const sVals = stats.getDataRange().getValues();
+  const sMap = new Map();
+  for (let i=1;i<sVals.length;i++){ const d=sVals[i][0]; if (typeof d==='number') sMap.set(d, i+1); }
+
+  // Helper to compute win pct and perf
+  const winPct = (W,D,G) => (G>0 ? (W + 0.5*D)/G : 0);
+  const avgOpp = (sum,cnt) => (cnt>0 ? sum/cnt : null);
+  const perf = (avg, pct) => (avg!=null ? (avg + 400*Math.log10(Math.max(0.01, Math.min(0.99, pct))/ (1-Math.max(0.01, Math.min(0.99, pct))))) : null);
+
+  // Write updates per Date (append if needed)
+  const headers = buildDailyStatsHeaders();
+  for (const [date, agg] of byDate.entries()) {
+    // Prepare a row with defaults
+    const row = new Array(headers.length).fill('');
+    row[0] = date;
+    // Core
+    const setBlock = (prefix, baseIdx, a, ratingSum=null, ratingDelta=null, ratingVal=null) => {
+      row[baseIdx+0]=a.G; row[baseIdx+1]=a.W; row[baseIdx+2]=a.D; row[baseIdx+3]=a.L;
+      const pct = winPct(a.W,a.D,a.G);
+      row[baseIdx+4]=pct; row[baseIdx+5]=a.Dur; row[baseIdx+6]=(a.Dur>0? a.Dur: '');
+      row[baseIdx+7]=avgOpp(a.OppSum,a.OppCnt); row[baseIdx+8]=perf(row[baseIdx+7], pct);
+      if (ratingSum!=null) row[baseIdx+9]=ratingSum; // R
+      if (ratingDelta!=null) row[baseIdx+10]=ratingDelta; // ΔR
+      if (ratingVal!=null) row[baseIdx+9]=ratingVal; // per-format R
+    };
+    // Compute Core sums from formats in agg
+    const coreFormats = ['Bul','Blz','Rap'];
+    let coreRsum = 0; for (const f of coreFormats){ const a=agg.fmt.get(f); if (a && typeof a.R==='number') coreRsum += a.R; }
+    setBlock('Core', 1, agg.Core, coreRsum, agg.Core.DeltaR);
+    // All block (no R)
+    setBlock('All', 12, agg.All, null, agg.All.DeltaR);
+    // Per-format blocks (in fixed order)
+    let col = 23; // start after All block
+    for (const f of FORMAT_SHORT_ORDER) {
+      const a = agg.fmt.get(f) || {G:0,W:0,D:0,L:0,Dur:0,OppSum:0,OppCnt:0,DeltaR:0, R:null};
+      setBlock(f, col, a, null, a.DeltaR, (a.R!=null?a.R:null));
+      col += 11;
+    }
+    // Upsert row
+    const existingRow = sMap.get(date);
+    if (existingRow) {
+      stats.getRange(existingRow, 1, 1, row.length).setValues([row]);
+    } else {
+      const lr = stats.getLastRow();
+      stats.getRange(lr+1, 1, 1, row.length).setValues([row]);
+      sMap.set(date, lr+1);
+    }
+  }
+
+  // Forward-fill per-format ratings indefinitely up to today
+  forwardFillRatings(stats);
+
+  // Update watermark
+  if (byDate.size>0) props.setProperty('LAST_STATS_END', String(Math.max(...Array.from(byDate.keys()).map(d => d))));
+}
+
+function forwardFillRatings(stats) {
+  const vals = stats.getDataRange().getValues(); if (vals.length<2) return;
+  const headers = vals[0];
+  // Build per-format R and ΔR column indices
+  const rIdx = {}; const dIdx = {};
+  for (let i=0;i<headers.length;i++) {
+    const h = headers[i];
+    if (h.endsWith('_R')) { rIdx[h.slice(0,-2)] = i; }
+    if (h.endsWith('_ΔR')) { dIdx[h.slice(0,-3)] = i; }
+  }
+  // For each format block, carry forward last non-null R and compute ΔR
+  const fmtKeys = ['Core','All',...FORMAT_SHORT_ORDER];
+  for (const f of FORMAT_SHORT_ORDER) {
+    const rCol = rIdx[f]; const dCol = dIdx[f]; if (rCol==null||dCol==null) continue;
+    let last = null;
+    for (let r=1;r<vals.length;r++) {
+      const cur = vals[r][rCol];
+      if (cur=== '' || cur==null) {
+        if (last!=null) vals[r][rCol] = last;
+        vals[r][dCol] = 0;
+      } else if (typeof cur === 'number') {
+        vals[r][dCol] = (last!=null ? (cur - last) : 0);
+        last = cur;
+      }
+    }
+  }
+  // Write back
+  stats.getRange(1,1,vals.length,vals[0].length).setValues(vals);
+}
 // ============================================
 // CONFIGURATION
 // ============================================
 const CONFIG = {
   USERNAME: 'frankscobey',
   MAX_GAMES_PER_BATCH: 3,
-  AUTO_FETCH_CALLBACK_DATA: true // Automatically fetch callback data for new games
+  AUTO_FETCH_CALLBACK_DATA: true, // Automatically fetch callback data for new games
+  AUTO_UPDATE_DAILY_STATS: false // Automatically update Daily Stats after fetch
 };
 
 const SHEETS = {
@@ -65,6 +262,40 @@ const OPENINGS_DB_HEADERS = [
 const DERIVED_OPENING_HEADERS = [
   'Opening Name', 'Opening Family'
 ];
+
+// ============================================
+// FORMATS (preferred order) and short codes
+// ============================================
+const FORMAT_SHORT_ORDER = ['Bul','Blz','Rap','Dly','D960','L960','Bug','Czh','KotH','3Chk'];
+const FORMAT_LABEL = {
+  Bul: 'Bullet',
+  Blz: 'Blitz',
+  Rap: 'Rapid',
+  Dly: 'Daily',
+  D960: 'Daily960',
+  L960: 'Live960',
+  Bug: 'Bughouse',
+  Czh: 'Crazyhouse',
+  KotH: 'KingoftheHill',
+  '3Chk': 'Threecheck'
+};
+
+function mapFormatToShort(format) {
+  if (!format) return '';
+  const f = String(format).toLowerCase();
+  if (f === 'bullet') return 'Bul';
+  if (f === 'blitz') return 'Blz';
+  if (f === 'rapid') return 'Rap';
+  if (f === 'daily') return 'Dly';
+  if (f === 'daily960') return 'D960';
+  if (f === 'live960') return 'L960';
+  if (f === 'bughouse') return 'Bug';
+  if (f === 'crazyhouse') return 'Czh';
+  if (f === 'kingofthehill') return 'KotH';
+  if (f === 'threecheck') return '3Chk';
+  // Default: return original string if unknown
+  return format;
+}
 
 // ============================================
 // MAIN MENU
@@ -826,7 +1057,7 @@ function processGamesData(games, username) {
       // Compute Rating Before/Delta (fast, format-local)
       // Use last seen rating for this format from prior writes in this batch, else from a small cache from existing sheet
       if (!processGamesData._formatLast) processGamesData._formatLast = new Map();
-      const key = format;
+      const key = mapFormatToShort(format);
       const last = processGamesData._formatLast.get(key);
       const ratingBefore = (typeof last === 'number') ? last : null;
       const deltaQuick = (ratingBefore != null && typeof myRating === 'number') ? (myRating - ratingBefore) : null;
@@ -866,7 +1097,7 @@ function processGamesData(games, username) {
         archiveTag,
         timeClass.toLowerCase() !== 'daily',
         timeClass,
-        format,
+        mapFormatToShort(format),
         tcParsed.baseTime,
         tcParsed.increment,
         tcParsed.correspondenceTime,
@@ -907,11 +1138,8 @@ function processGamesData(games, username) {
     const wrote = derivedSheet.getRange(lastRow + 1, 1, derivedRows.length, derivedRows[0].length).getValues();
     if (!processGamesData._formatLast) processGamesData._formatLast = new Map();
     for (const r of wrote) {
-      const fmt = r[8]; // Time Class or r[9] if Format; we use Format column index below
-      const formatColIndex = 9; // 0-based: Game ID(0), Start(1), End(2), EndLocal(3), DateSerial(4), Archive(5), IsLive(6), TimeClass(7), Format(8), Base(9)
-      const myRatingColIndex = 14; // My Rating after added columns
-      const formatVal = r[8];
-      const myRatingVal = r[14];
+      const formatVal = r[8]; // Format short at col 9 (1-based)
+      const myRatingVal = r[14]; // My Rating at col 15 (1-based)
       if (typeof myRatingVal === 'number') {
         processGamesData._formatLast.set(formatVal, myRatingVal);
       }
@@ -1357,6 +1585,21 @@ function setupSheets() {
     // Keep Games visible
   } else {
     // If a legacy sheet exists, we won't auto-migrate columns here.
+  }
+
+  // Ensure Daily Stats sheet exists
+  let stats = ss.getSheetByName('Daily Stats');
+  if (!stats) {
+    stats = ss.insertSheet('Daily Stats');
+    const statHeaders = buildDailyStatsHeaders();
+    stats.getRange(1, 1, 1, statHeaders.length).setValues([statHeaders]);
+    stats.getRange(1, 1, 1, statHeaders.length)
+      .setFontWeight('bold')
+      .setBackground('#2b7de9')
+      .setFontColor('#ffffff');
+    stats.setFrozenRows(1);
+    // Hide heavy columns by default (AvgOpp, Perf) and group blocks
+    groupAndFormatDailyStats(stats, statHeaders);
   }
 
   
