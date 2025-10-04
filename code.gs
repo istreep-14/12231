@@ -766,7 +766,7 @@ function processGamesData(games, username) {
   const rows = [];
   const derivedRows = [];
   
-  // Sort games by timestamp (oldest first) to ensure Last Rating fills correctly
+  // Sort games by timestamp (oldest first)
   const sortedGames = games.slice().sort((a, b) => a.end_time - b.end_time);
   
   // Pre-load existing games data once for performance
@@ -832,19 +832,8 @@ function processGamesData(games, username) {
       const myRating = isWhite ? game.white?.rating : game.black?.rating;
       const oppRating = isWhite ? game.black?.rating : game.white?.rating;
       
-      // Calculate Last Rating from pre-loaded data AND games processed in this batch
-      // Use end_time comparison; fall back to earlier same-second using <=
+      // Last Rating deprecated in combined sheet; keep legacy computation only for Games rows if needed
       let lastRating = null;
-      let lastGameTime = 0;
-      for (const existingGame of existingGames) {
-        if (existingGame.format === format) {
-          const isEarlier = existingGame.timestamp < game.end_time || (existingGame.timestamp === game.end_time);
-          if (isEarlier && existingGame.timestamp >= lastGameTime && existingGame.rating && existingGame.rating !== 'N/A') {
-            lastGameTime = existingGame.timestamp;
-            lastRating = existingGame.rating;
-          }
-        }
-      }
       
       // Parse time control
       const tcParsed = parseTimeControl(game.time_control, game.time_class);
@@ -879,6 +868,8 @@ function processGamesData(games, username) {
         startDateTime,
         endDateTime,
         duration || null,
+        startDateTime ? Math.floor(startDateTime.getTime() / 1000) : null,
+        Math.floor(endDateTime.getTime() / 1000),
         timeClass.toLowerCase() !== 'daily',
         timeClass,
         tcParsed.baseTime,
@@ -922,22 +913,7 @@ function processGamesData(games, username) {
   return rows;
 }
 
-function ensureDerivedDbColumns(derivedSheet) {
-  if (!derivedSheet) return;
-  const lastCol = derivedSheet.getLastColumn();
-  const headers = derivedSheet.getRange(1, 1, 1, lastCol).getValues()[0];
-  for (const header of DERIVED_DB_HEADERS) {
-    const idx = headers.indexOf(header);
-    if (idx === -1) {
-      derivedSheet.insertColumnAfter(derivedSheet.getLastColumn());
-      const col = derivedSheet.getLastColumn();
-      derivedSheet.getRange(1, col).setValue(header)
-        .setFontWeight('bold')
-        .setBackground('#666666')
-        .setFontColor('#ffffff');
-    }
-  }
-}
+function ensureDerivedDbColumns(_derivedSheet) { /* no-op: using minimal opening outputs inline */ }
 
 // Get game format based on rules and time control
 function getGameFormat(game) {
@@ -1374,7 +1350,7 @@ function setupSheets() {
     const headers = [
       'Game URL', 'End Date', 'End Time', 'My Color', 'Opponent',
       'Outcome', 'Termination', 'Format',
-      'My Rating', 'Opp Rating', 'Last Rating',
+      'My Rating', 'Opp Rating',
       'Game ID', 'Analyzed', 'Callback Fetched'
     ];
     gamesSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -1396,7 +1372,7 @@ function setupSheets() {
     const headers = [
       // Combined lean schema
       'Game ID', 'Game URL',
-      'Start', 'End', 'Duration (s)',
+      'Start', 'End', 'Duration (s)', 'Start (epoch s)', 'End (epoch s)',
       'Is Live', 'Time Class', 'Base Time (s)', 'Increment (s)',
       'Is White', 'Opponent', 'My Rating', 'Opp Rating',
       'Outcome', 'Termination',
@@ -1528,11 +1504,11 @@ function refreshDerivedDbMappings() {
   const ecoSlugs = derivedSheet.getRange(2, ecoSlugCol, lastRow - 1, 1).getValues().map(r => String(r[0] || ''));
   const writeRows = [];
   for (const ecoSlug of ecoSlugs) {
-    const vals = getDbMappingValues(ecoSlug);
+    const vals = getOpeningOutputs(ecoSlug);
     writeRows.push(vals);
   }
 
-  derivedSheet.getRange(2, startDbCol, writeRows.length, DERIVED_DB_HEADERS.length).setValues(writeRows);
+  derivedSheet.getRange(2, startDbCol, writeRows.length, DERIVED_OPENING_HEADERS.length).setValues(writeRows);
   SpreadsheetApp.getUi().alert('✅ Opening mappings refreshed');
 }
 
