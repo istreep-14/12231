@@ -836,15 +836,19 @@ function processGamesData(games, username) {
 
       // Store combined lean data in derived sheet
       const dbValues = getOpeningOutputs(ecoSlug);
-      const startEpoch = startDateTime ? Math.floor(startDateTime.getTime() / 1000) : null;
-      const endEpoch = Math.floor(endDateTime.getTime() / 1000);
-      const endLocalEpoch = endEpoch; // Store UTC epoch; convert to local in formulas if needed
+      const startLocalEpoch = startDateTime ? Math.floor(new Date(startDateTime.getFullYear(), startDateTime.getMonth(), startDateTime.getDate(), startDateTime.getHours(), startDateTime.getMinutes(), startDateTime.getSeconds()).getTime() / 1000) : null;
+      const endLocalEpoch = Math.floor(new Date(endDateTime.getFullYear(), endDateTime.getMonth(), endDateTime.getDate(), endDateTime.getHours(), endDateTime.getMinutes(), endDateTime.getSeconds()).getTime() / 1000);
       const endLocalSerial = (() => {
         // Google Sheets serial date: days since 1899-12-30 (accounts for 1900 leap bug)
         const msPerDay = 24 * 60 * 60 * 1000;
         const epoch = new Date(Date.UTC(1899, 11, 30));
         const localDate = new Date(endDateTime.getFullYear(), endDateTime.getMonth(), endDateTime.getDate());
         return Math.floor((localDate.getTime() - epoch.getTime()) / msPerDay);
+      })();
+      const endLocalTime = (() => {
+        // Seconds since local midnight
+        const d = new Date(endDateTime);
+        return d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
       })();
 
       // Archive tag (MM/YY) from end UTC
@@ -855,10 +859,10 @@ function processGamesData(games, username) {
 
       derivedRows.push([
         gameId,
-        startEpoch,
-        endEpoch,
+        startLocalEpoch,
         endLocalEpoch,
         endLocalSerial,
+        endLocalTime,
         archiveTag,
         timeClass.toLowerCase() !== 'daily',
         timeClass,
@@ -1330,9 +1334,9 @@ function setupSheets() {
   if (!derivedSheet) {
     derivedSheet = ss.insertSheet(SHEETS.GAMES);
     const headers = [
-      // Combined lean schema
+      // Combined lean schema (local time standard)
       'Game ID',
-      'Start (epoch s)', 'End (epoch s)', 'End (local epoch s)', 'End Local Date (serial)', 'Archive (MM/YY)',
+      'Start', 'End', 'Date', 'Time', 'Archive (MM/YY)',
       'Is Live', 'Time Class', 'Format', 'Base Time (s)', 'Increment (s)', 'Correspondence Time (s)',
       'Is White', 'Opponent', 'My Rating', 'Opp Rating', 'Rating Before', 'Delta',
       'Outcome', 'Termination',
