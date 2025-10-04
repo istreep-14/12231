@@ -269,7 +269,7 @@ function fetchCallbackLastN(count) {
   const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   const callbackSheet = ss.getSheetByName(SHEETS.CALLBACK);
   
-  if (!gamesSheet || !callbackSheet) {
+  if (!derivedSheet || !callbackSheet) {
     SpreadsheetApp.getUi().alert('❌ Please run "Setup Sheets" first!');
     return;
   }
@@ -337,7 +337,7 @@ function getGamesWithoutCallback(maxCount) {
 
 function fetchCallbackForGames(gamesToFetch) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   
   let successCount = 0;
   let errorCount = 0;
@@ -1407,9 +1407,9 @@ function refreshDerivedDbMappings() {
   if (lastRow < 2) return;
 
   const headers = derivedSheet.getRange(1, 1, 1, lastCol).getValues()[0];
-  const ecoSlugCol = headers.indexOf('ECO Slug') + 1;
-  if (ecoSlugCol <= 0) {
-    SpreadsheetApp.getUi().alert('ECO Slug column not found');
+  const ecoCol = headers.indexOf('ECO') + 1;
+  if (ecoCol <= 0) {
+    SpreadsheetApp.getUi().alert('ECO column not found');
     return;
   }
 
@@ -1440,7 +1440,7 @@ function refreshDerivedDbMappings() {
     startDbCol = newHeaders.indexOf(DERIVED_DB_HEADERS[0]) + 1;
   }
 
-  const ecoSlugs = derivedSheet.getRange(2, ecoSlugCol, lastRow - 1, 1).getValues().map(r => String(r[0] || ''));
+  const ecoSlugs = derivedSheet.getRange(2, ecoCol, lastRow - 1, 1).getValues().map(r => String(r[0] || ''));
   const writeRows = [];
   for (const ecoSlug of ecoSlugs) {
     const vals = getOpeningOutputs(ecoSlug);
