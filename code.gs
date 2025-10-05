@@ -47,6 +47,12 @@ function buildDailyStatsHeaders() {
 
 // Group/hide heavy columns in Daily Stats
 function groupAndFormatDailyStats(sheet, headers) {
+  // Allow caller to omit headers; read from sheet if needed
+  if (!headers || !Array.isArray(headers) || headers.length === 0) {
+    const lastColSheet = sheet.getLastColumn();
+    if (lastColSheet < 1) return;
+    headers = sheet.getRange(1, 1, 1, lastColSheet).getValues()[0];
+  }
   // Hide AvgOpp and Perf columns by default; format DurF
   const lastCol = headers.length;
   // Find column indices for *_AvgOpp and *_Perf and hide
