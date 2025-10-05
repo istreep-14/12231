@@ -1591,34 +1591,30 @@ function setupSheets() {
     gamesSheet.getRange('C:C').setNumberFormat('h:mm AM/PM');
   }
   
-  let derivedSheet = ss.getSheetByName(SHEETS.GAMES);
-  if (!derivedSheet) {
-    derivedSheet = ss.insertSheet(SHEETS.GAMES);
-    const headers = [
-      // Combined lean schema (local time standard)
-      'Game ID',
-      'Start', 'End', 'Date', 'Time', 'Archive (MM/YY)',
-      'Is Live', 'Time Class', 'Format', 'Base Time (s)', 'Increment (s)', 'Correspondence Time (s)',
-      'Is White', 'Opponent', 'My Rating', 'Opp Rating', 'Rating Before', 'Delta',
-      'Outcome', 'Termination',
-      'ECO', 'Opening Name', 'Opening Family',
-      'Ply Count',
-      // Compact detail
-      'tcn', 'clocks'
-    ];
-    derivedSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-    derivedSheet.getRange(1, 1, 1, headers.length)
-      .setFontWeight('bold')
-      .setBackground('#666666')
-      .setFontColor('#ffffff');
-    derivedSheet.setFrozenRows(1);
-    
-    // No formatted datetime columns in combined sheet
-    
-    // Keep Games visible
-  } else {
-    // If a legacy sheet exists, we won't auto-migrate columns here.
+  const gamesHeaders = [
+    // Combined lean schema (local time standard)
+    'Game ID',
+    'Start', 'End', 'Date', 'Time', 'Archive (MM/YY)',
+    'Is Live', 'Time Class', 'Format', 'Base Time (s)', 'Increment (s)', 'Correspondence Time (s)',
+    'Is White', 'Opponent', 'My Rating', 'Opp Rating', 'Rating Before', 'Delta',
+    'Outcome', 'Termination',
+    'ECO', 'Opening Name', 'Opening Family',
+    'Ply Count',
+    // Compact detail
+    'tcn', 'clocks'
+  ];
+
+  let gamesSheetRef = ss.getSheetByName(SHEETS.GAMES);
+  if (!gamesSheetRef) {
+    gamesSheetRef = ss.insertSheet(SHEETS.GAMES);
   }
+  // Always reset the header row to canonical headers
+  gamesSheetRef.getRange(1, 1, 1, gamesHeaders.length).setValues([gamesHeaders]);
+  gamesSheetRef.getRange(1, 1, 1, gamesHeaders.length)
+    .setFontWeight('bold')
+    .setBackground('#666666')
+    .setFontColor('#ffffff');
+  gamesSheetRef.setFrozenRows(1);
 
   // Ensure Daily Stats sheet exists
   let stats = ss.getSheetByName('Daily Stats');
