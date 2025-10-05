@@ -1,17 +1,251 @@
+// Initial build of Daily Stats from all existing Games
+function buildDailyStatsInitial() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const games = ss.getSheetByName(SHEETS.GAMES);
+  const stats = ss.getSheetByName('Daily Stats');
+  if (!games || !stats) { SpreadsheetApp.getUi().alert('Run Setup Sheets first'); return; }
+
+  const gVals = games.getDataRange().getValues();
+  if (gVals.length < 2) return;
+  const gh = gVals[0];
+  const idx = (name) => gh.indexOf(name);
+  const iDate = idx('Date');
+  const iEnd = idx('End');
+  const iFormat = idx('Format');
+  const iIsLive = idx('Is Live');
+  const iOutcome = idx('Outcome');
+  const iMyRating = idx('My Rating');
+  const iOppRating = idx('Opp Rating');
+  const iStart = idx('Start');
+  const iDelta = idx('Delta');
+  if ([iDate, iEnd, iFormat, iIsLive, iOutcome, iMyRating, iOppRating, iStart, iDelta].some(v => v < 0)) return;
+
+  // Reset Daily Stats (keep header)
+  if (stats.getLastRow() > 1) stats.getRange(2,1,stats.getLastRow()-1,stats.getLastColumn()).clearContent();
+
+  // Accumulate all games
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty('LAST_STATS_END', '0');
+  updateDailyStatsIncremental();
+}
+// Build Daily Stats headers (Date + Core, All, and per-format blocks)
+function buildDailyStatsHeaders() {
+  const h = ['Date'];
+  const addBlock = (prefix) => {
+    h.push(
+      `${prefix}_G`, `${prefix}_W`, `${prefix}_D`, `${prefix}_L`,
+      `${prefix}_WinPct`, `${prefix}_Dur`, `${prefix}_DurF`,
+      `${prefix}_AvgOpp`, `${prefix}_Perf`,
+      `${prefix}_R`, `${prefix}_ΔR`
+    );
+  };
+  addBlock('Core');
+  addBlock('All');
+  for (const fmt of FORMAT_SHORT_ORDER) addBlock(fmt);
+  return h;
+}
+
+// Group/hide heavy columns in Daily Stats
+function groupAndFormatDailyStats(sheet, headers) {
+  // Allow caller to omit headers; read from sheet if needed
+  if (!headers || !Array.isArray(headers) || headers.length === 0) {
+    const lastColSheet = sheet.getLastColumn();
+    if (lastColSheet < 1) return;
+    headers = sheet.getRange(1, 1, 1, lastColSheet).getValues()[0];
+  }
+  // Hide AvgOpp and Perf columns by default; format DurF
+  const lastCol = headers.length;
+  // Find column indices for *_AvgOpp and *_Perf and hide
+  for (let c = 1; c <= lastCol; c++) {
+    const name = headers[c - 1];
+    if (name.endsWith('_AvgOpp') || name.endsWith('_Perf')) {
+      sheet.hideColumns(c);
+    }
+    if (name.endsWith('_DurF')) {
+      sheet.getRange(2, c, sheet.getMaxRows() - 1, 1).setNumberFormat('[h]:mm:ss');
+    }
+  }
+}
+
+// Incremental update of Daily Stats based on new Games rows only
+function updateDailyStatsIncremental() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const games = ss.getSheetByName(SHEETS.GAMES);
+  const stats = ss.getSheetByName('Daily Stats');
+  if (!games || !stats) return;
+
+  const props = PropertiesService.getScriptProperties();
+  const lastEndStr = props.getProperty('LAST_STATS_END') || '0';
+  const lastEnd = parseInt(lastEndStr, 10) || 0;
+
+  const gVals = games.getDataRange().getValues();
+  if (gVals.length < 2) return;
+  const gh = gVals[0];
+  const idx = (name) => gh.indexOf(name);
+  const iDate = idx('Date');
+  const iEnd = idx('End');
+  const iFormat = idx('Format');
+  const iIsLive = idx('Is Live');
+  const iOutcome = idx('Outcome');
+  const iMyRating = idx('My Rating');
+  const iOppRating = idx('Opp Rating');
+  const iStart = idx('Start');
+  const iDelta = idx('Delta');
+  if ([iDate, iEnd, iFormat, iIsLive, iOutcome, iMyRating, iOppRating, iStart, iDelta].some(v => v < 0)) return;
+
+  // Accumulators: date -> aggregate, and per-format map
+  const byDate = new Map();
+  function getAgg(date) {
+    if (!byDate.has(date)) {
+      const agg = {
+        All: {G:0,W:0,D:0,L:0,Dur:0,OppSum:0,OppCnt:0,DeltaR:0},
+        Core: {G:0,W:0,D:0,L:0,Dur:0,OppSum:0,OppCnt:0,DeltaR:0},
+        fmt: new Map(),
+        lastRatings: new Map()
+      };
+      for (const f of FORMAT_SHORT_ORDER) agg.fmt.set(f, {G:0,W:0,D:0,L:0,Dur:0,OppSum:0,OppCnt:0,DeltaR:0, R:null});
+      byDate.set(date, agg);
+    }
+    return byDate.get(date);
+  }
+
+  // Process only new games (End > LAST_STATS_END)
+  for (let r = 1; r < gVals.length; r++) {
+    const row = gVals[r];
+    const end = row[iEnd];
+    if (typeof end !== 'number' || end <= lastEnd) continue;
+    const date = row[iDate];
+    const fmtShort = mapFormatToShort(row[iFormat]);
+    const isCore = (fmtShort === 'Bul' || fmtShort === 'Blz' || fmtShort === 'Rap');
+    const isLive = String(row[iIsLive]).toLowerCase() === 'true';
+    const outcome = String(row[iOutcome] || '');
+    const myR = typeof row[iMyRating] === 'number' ? row[iMyRating] : null;
+    const oppR = typeof row[iOppRating] === 'number' ? row[iOppRating] : null;
+    const start = row[iStart];
+    const delta = typeof row[iDelta] === 'number' ? row[iDelta] : 0;
+    const dur = (isLive && typeof end === 'number' && typeof start === 'number') ? Math.max(0, end - start) : 0;
+
+    const agg = getAgg(date);
+    const aAll = agg.All;
+    const aCore = agg.Core;
+    const aFmt = agg.fmt.get(fmtShort) || {G:0,W:0,D:0,L:0,Dur:0,OppSum:0,OppCnt:0,DeltaR:0, R:null};
+
+    // Outcomes
+    let w=0,d=0,l=0;
+    if (outcome === 'Win') w=1; else if (outcome === 'Draw') d=1; else if (outcome === 'Loss') l=1;
+
+    // Update All
+    aAll.G++; aAll.W+=w; aAll.D+=d; aAll.L+=l; aAll.Dur+=dur; aAll.DeltaR+=delta; if (typeof oppR==='number'){aAll.OppSum+=oppR; aAll.OppCnt++;}
+    // Update Core
+    if (isCore) { aCore.G++; aCore.W+=w; aCore.D+=d; aCore.L+=l; aCore.Dur+=dur; aCore.DeltaR+=delta; if (typeof oppR==='number'){aCore.OppSum+=oppR; aCore.OppCnt++;} }
+    // Update Format
+    aFmt.G++; aFmt.W+=w; aFmt.D+=d; aFmt.L+=l; aFmt.Dur+=dur; aFmt.DeltaR+=delta; if (typeof oppR==='number'){aFmt.OppSum+=oppR; aFmt.OppCnt++;}
+    if (typeof myR==='number') aFmt.R = myR; // end-of-day rating (last write wins by End order)
+    agg.fmt.set(fmtShort, aFmt);
+  }
+
+  // Build row index for stats (Date -> row)
+  const sVals = stats.getDataRange().getValues();
+  const sMap = new Map();
+  for (let i=1;i<sVals.length;i++){ const d=sVals[i][0]; if (typeof d==='number') sMap.set(d, i+1); }
+
+  // Helper to compute win pct and perf
+  const winPct = (W,D,G) => (G>0 ? (W + 0.5*D)/G : 0);
+  const avgOpp = (sum,cnt) => (cnt>0 ? sum/cnt : null);
+  const perf = (avg, pct) => (avg!=null ? (avg + 400*Math.log10(Math.max(0.01, Math.min(0.99, pct))/ (1-Math.max(0.01, Math.min(0.99, pct))))) : null);
+
+  // Write updates per Date (append if needed)
+  const headers = buildDailyStatsHeaders();
+  for (const [date, agg] of byDate.entries()) {
+    // Prepare a row with defaults
+    const row = new Array(headers.length).fill('');
+    row[0] = date;
+    // Core
+    const setBlock = (prefix, baseIdx, a, ratingSum=null, ratingDelta=null, ratingVal=null) => {
+      row[baseIdx+0]=a.G; row[baseIdx+1]=a.W; row[baseIdx+2]=a.D; row[baseIdx+3]=a.L;
+      const pct = winPct(a.W,a.D,a.G);
+      row[baseIdx+4]=pct; row[baseIdx+5]=a.Dur; row[baseIdx+6]=(a.Dur>0? a.Dur: '');
+      row[baseIdx+7]=avgOpp(a.OppSum,a.OppCnt); row[baseIdx+8]=perf(row[baseIdx+7], pct);
+      if (ratingSum!=null) row[baseIdx+9]=ratingSum; // R
+      if (ratingDelta!=null) row[baseIdx+10]=ratingDelta; // ΔR
+      if (ratingVal!=null) row[baseIdx+9]=ratingVal; // per-format R
+    };
+    // Compute Core sums from formats in agg
+    const coreFormats = ['Bul','Blz','Rap'];
+    let coreRsum = 0; for (const f of coreFormats){ const a=agg.fmt.get(f); if (a && typeof a.R==='number') coreRsum += a.R; }
+    setBlock('Core', 1, agg.Core, coreRsum, agg.Core.DeltaR);
+    // All block (no R)
+    setBlock('All', 12, agg.All, null, agg.All.DeltaR);
+    // Per-format blocks (in fixed order)
+    let col = 23; // start after All block
+    for (const f of FORMAT_SHORT_ORDER) {
+      const a = agg.fmt.get(f) || {G:0,W:0,D:0,L:0,Dur:0,OppSum:0,OppCnt:0,DeltaR:0, R:null};
+      setBlock(f, col, a, null, a.DeltaR, (a.R!=null?a.R:null));
+      col += 11;
+    }
+    // Upsert row
+    const existingRow = sMap.get(date);
+    if (existingRow) {
+      stats.getRange(existingRow, 1, 1, row.length).setValues([row]);
+    } else {
+      const lr = stats.getLastRow();
+      stats.getRange(lr+1, 1, 1, row.length).setValues([row]);
+      sMap.set(date, lr+1);
+    }
+  }
+
+  // Forward-fill per-format ratings indefinitely up to today
+  forwardFillRatings(stats);
+
+  // Update watermark
+  if (byDate.size>0) props.setProperty('LAST_STATS_END', String(Math.max(...Array.from(byDate.keys()).map(d => d))));
+}
+
+function forwardFillRatings(stats) {
+  const vals = stats.getDataRange().getValues(); if (vals.length<2) return;
+  const headers = vals[0];
+  // Build per-format R and ΔR column indices
+  const rIdx = {}; const dIdx = {};
+  for (let i=0;i<headers.length;i++) {
+    const h = headers[i];
+    if (h.endsWith('_R')) { rIdx[h.slice(0,-2)] = i; }
+    if (h.endsWith('_ΔR')) { dIdx[h.slice(0,-3)] = i; }
+  }
+  // For each format block, carry forward last non-null R and compute ΔR
+  const fmtKeys = ['Core','All',...FORMAT_SHORT_ORDER];
+  for (const f of FORMAT_SHORT_ORDER) {
+    const rCol = rIdx[f]; const dCol = dIdx[f]; if (rCol==null||dCol==null) continue;
+    let last = null;
+    for (let r=1;r<vals.length;r++) {
+      const cur = vals[r][rCol];
+      if (cur=== '' || cur==null) {
+        if (last!=null) vals[r][rCol] = last;
+        vals[r][dCol] = 0;
+      } else if (typeof cur === 'number') {
+        vals[r][dCol] = (last!=null ? (cur - last) : 0);
+        last = cur;
+      }
+    }
+  }
+  // Write back
+  stats.getRange(1,1,vals.length,vals[0].length).setValues(vals);
+}
 // ============================================
 // CONFIGURATION
 // ============================================
 const CONFIG = {
   USERNAME: 'frankscobey',
   MAX_GAMES_PER_BATCH: 3,
-  AUTO_FETCH_CALLBACK_DATA: true // Automatically fetch callback data for new games
+  AUTO_FETCH_CALLBACK_DATA: true, // Automatically fetch callback data for new games
+  AUTO_UPDATE_DAILY_STATS: false // Automatically update Daily Stats after fetch
 };
 
 const SHEETS = {
+  // Combined sheet is the canonical games table
   GAMES: 'Games',
   ANALYSIS: 'Analysis',
   CALLBACK: 'Callback',
-  DERIVED: 'Derived Data'
+  OPENINGS_DB: 'Openings DB'
 };
 
 // Result to outcome mapping
@@ -52,6 +286,52 @@ const TERMINATION_MAP = {
   'bughousepartnerlose': 'Bughouse partner lost'
 };
 
+// Cache for openings database (sheet-backed)
+let OPENINGS_DB_CACHE = null;
+const OPENINGS_DB_HEADERS = [
+  'Name', 'Trim Slug', 'Family', 'Name',
+  'Variation 1', 'Variation 2', 'Variation 3', 'Variation 4', 'Variation 5', 'Variation 6'
+];
+
+// Minimal opening outputs to store in-sheet
+const DERIVED_OPENING_HEADERS = [
+  'Opening Name', 'Opening Family'
+];
+
+// ============================================
+// FORMATS (preferred order) and short codes
+// ============================================
+const FORMAT_SHORT_ORDER = ['Bul','Blz','Rap','Dly','D960','L960','Bug','Czh','KotH','3Chk'];
+const FORMAT_LABEL = {
+  Bul: 'Bullet',
+  Blz: 'Blitz',
+  Rap: 'Rapid',
+  Dly: 'Daily',
+  D960: 'Daily960',
+  L960: 'Live960',
+  Bug: 'Bughouse',
+  Czh: 'Crazyhouse',
+  KotH: 'KingoftheHill',
+  '3Chk': 'Threecheck'
+};
+
+function mapFormatToShort(format) {
+  if (!format) return '';
+  const f = String(format).toLowerCase();
+  if (f === 'bullet') return 'Bul';
+  if (f === 'blitz') return 'Blz';
+  if (f === 'rapid') return 'Rap';
+  if (f === 'daily') return 'Dly';
+  if (f === 'daily960') return 'D960';
+  if (f === 'live960') return 'L960';
+  if (f === 'bughouse') return 'Bug';
+  if (f === 'crazyhouse') return 'Czh';
+  if (f === 'kingofthehill') return 'KotH';
+  if (f === 'threecheck') return '3Chk';
+  // Default: return original string if unknown
+  return format;
+}
+
 // ============================================
 // MAIN MENU
 // ============================================
@@ -63,6 +343,7 @@ function onOpen() {
     .addItem('3️⃣ Update Recent Games', 'fetchChesscomGames')
     .addSeparator()
     .addItem('📋 Fetch Callback Last 10', 'fetchCallbackLast10')
+    .addItem('🔗 Refresh Opening Mappings', 'refreshDerivedDbMappings')
     .addToUi();
 }
 
@@ -251,10 +532,10 @@ function fetchCallbackLast50() { fetchCallbackLastN(50); }
 
 function fetchCallbackLastN(count) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   const callbackSheet = ss.getSheetByName(SHEETS.CALLBACK);
   
-  if (!gamesSheet || !callbackSheet) {
+  if (!derivedSheet || !callbackSheet) {
     SpreadsheetApp.getUi().alert('❌ Please run "Setup Sheets" first!');
     return;
   }
@@ -280,40 +561,41 @@ function fetchCallbackLastN(count) {
 
 function getGamesWithoutCallback(maxCount) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
-  const data = gamesSheet.getDataRange().getValues();
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
+  if (!derivedSheet) return [];
+  const data = derivedSheet.getDataRange().getValues();
   const games = [];
   
-  // Iterate from newest to oldest (reverse order)
+  // Iterate from newest to oldest (reverse order) using combined columns
+  // Combined columns: [0]=Game ID, [1]=Game URL, [5]=Start epoch, [6]=End epoch, [7]=Is Live, [8]=Time Class
+  // Callback tracking: add a 'Callback Fetched' boolean column at end if missing
+  const header = data[0] || [];
+  let cbCol = header.indexOf('Callback Fetched');
+  if (cbCol === -1) {
+    derivedSheet.insertColumnAfter(derivedSheet.getLastColumn());
+    cbCol = derivedSheet.getLastColumn() - 1;
+    derivedSheet.getRange(1, cbCol + 1).setValue('Callback Fetched')
+      .setFontWeight('bold')
+      .setBackground('#666666')
+      .setFontColor('#ffffff');
+  }
   for (let i = data.length - 1; i >= 1 && games.length < maxCount; i--) {
-    if (data[i][13] === false) { // Callback Fetched column (index 13)
-      const myColor = data[i][3];
-      const opponent = data[i][4];
-      const gameId = data[i][11];
-      
-      // Get time class from derived data
-      const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
-      let timeClass = '';
-      
-      if (derivedSheet) {
-        const derivedData = derivedSheet.getDataRange().getValues();
-        for (let j = 1; j < derivedData.length; j++) {
-          if (derivedData[j][0] === gameId) {
-            timeClass = derivedData[j][5];
-            break;
-          }
-        }
-      }
-      
-      games.push({
-        row: i + 1,
-        gameId: gameId,
-        gameUrl: data[i][0],
-        white: myColor === 'white' ? CONFIG.USERNAME : opponent,
-        black: myColor === 'black' ? CONFIG.USERNAME : opponent,
-        timeClass: timeClass
-      });
-    }
+    if (data[i][cbCol] === true) continue;
+    const gameId = data[i][0];
+    const timeClass = data[i][8];
+    const isLive = data[i][7];
+    const url = data[i][1];
+    const whiteUser = ''; // unknown without reading PGN here
+    const blackUser = '';
+    if (!gameId) continue;
+    games.push({
+      row: i + 1,
+      gameId: gameId,
+      gameUrl: url,
+      white: whiteUser,
+      black: blackUser,
+      timeClass: timeClass
+    });
   }
   
   return games.reverse(); // Return in chronological order (oldest first)
@@ -321,7 +603,7 @@ function getGamesWithoutCallback(maxCount) {
 
 function fetchCallbackForGames(gamesToFetch) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   
   let successCount = 0;
   let errorCount = 0;
@@ -339,8 +621,18 @@ function fetchCallbackForGames(gamesToFetch) {
         saveCallbackData(callbackData);
         
         // Mark callback as fetched
-        if (game.row) {
-          gamesSheet.getRange(game.row, 14).setValue(true); // Callback Fetched column (index 14)
+        if (game.row && derivedSheet) {
+          const header = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
+          let cbCol = header.indexOf('Callback Fetched');
+          if (cbCol === -1) {
+            derivedSheet.insertColumnAfter(derivedSheet.getLastColumn());
+            cbCol = derivedSheet.getLastColumn() - 1;
+            derivedSheet.getRange(1, cbCol + 1).setValue('Callback Fetched')
+              .setFontWeight('bold')
+              .setBackground('#666666')
+              .setFontColor('#ffffff');
+          }
+          derivedSheet.getRange(game.row, cbCol + 1).setValue(true);
         }
         
         successCount++;
@@ -363,10 +655,14 @@ function fetchCallbackForGames(gamesToFetch) {
 function findGameRow(gameId) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
+  if (!gamesSheet) return -1;
   const data = gamesSheet.getDataRange().getValues();
-  
+  if (data.length < 2) return -1;
+  const header = data[0];
+  const idCol = header.indexOf('Game ID');
+  if (idCol < 0) return -1;
   for (let i = 1; i < data.length; i++) {
-    if (data[i][11] === gameId) { // Game ID column (index 11)
+    if (String(data[i][idCol]) === String(gameId)) {
       return i + 1;
     }
   }
@@ -380,9 +676,9 @@ function findGameRow(gameId) {
 function fetchAllGamesInitial() {
   const username = CONFIG.USERNAME;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   
-  if (!gamesSheet) {
+  if (!derivedSheet) {
     SpreadsheetApp.getUi().alert('❌ Please run "Setup Sheets" first!');
     return;
   }
@@ -432,12 +728,13 @@ function fetchAllGamesInitial() {
       Logger.log(`Archive ${i + 1}/${archives.length}: ${response.data?.games?.length || 0} games`);
     }
     
-    // Filter out duplicates before processing
+    // Filter out duplicates before processing (use Derived sheet Game ID)
     const existingGameIds = new Set();
-    if (gamesSheet.getLastRow() > 1) {
-      const existingData = gamesSheet.getDataRange().getValues();
+    if (derivedSheet.getLastRow() > 1) {
+      const existingData = derivedSheet.getDataRange().getValues();
+      // 'Game ID' is column 1 in combined sheet
       for (let i = 1; i < existingData.length; i++) {
-        existingGameIds.add(existingData[i][11]); // Game ID column (index 11)
+        existingGameIds.add(existingData[i][0]);
       }
     }
     
@@ -447,11 +744,9 @@ function fetchAllGamesInitial() {
     });
     
     ss.toast(`Processing ${newGames.length} games...`, '⏳', -1);
-    const rows = processGamesData(newGames, username);
+    const processedCount = processGamesData(newGames, username);
     
-    if (rows.length > 0) {
-      const lastRow = gamesSheet.getLastRow();
-      gamesSheet.getRange(lastRow + 1, 1, rows.length, rows[0].length).setValues(rows);
+    if (processedCount > 0) {
       
       // Find and store the most recent game URL (latest end_time)
       let mostRecentGame = newGames[0];
@@ -462,6 +757,14 @@ function fetchAllGamesInitial() {
       }
       props.setProperty('LAST_GAME_URL', mostRecentGame.url);
       props.setProperty('INITIAL_FETCH_COMPLETE', 'true');
+      // Mark previous month as finalized, since initial fetch pulled all archives
+      const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const prevYear = prevMonthDate.getFullYear();
+      const prevMonth = String(prevMonthDate.getMonth() + 1).padStart(2, '0');
+      const prevYearMonth = `${prevYear}_${prevMonth}`;
+      if (prevYearMonth !== currentYearMonth) {
+        props.setProperty('LAST_FINALIZED_MONTH', prevYearMonth);
+      }
       
       ss.toast(`✅ Fetched ${newGames.length} games!`, '✅', 5);
       
@@ -477,9 +780,9 @@ function fetchAllGamesInitial() {
 function fetchChesscomGames() {
   const username = CONFIG.USERNAME;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   
-  if (!gamesSheet) {
+  if (!derivedSheet) {
     SpreadsheetApp.getUi().alert('❌ Please run "Setup Sheets" first!');
     return;
   }
@@ -520,12 +823,17 @@ function fetchChesscomGames() {
     const prevMonth = String(prevMonthDate.getMonth() + 1).padStart(2, '0');
     const prevYearMonth = `${prevYear}_${prevMonth}`;
     const lastFinalizedMonth = props.getProperty('LAST_FINALIZED_MONTH') || '';
-    
+
     // If previous month hasn't been finalized and it's not current month, fetch it
     if (lastFinalizedMonth !== prevYearMonth && prevYearMonth !== currentYearMonth) {
-      const prevArchiveUrl = `https://api.chess.com/pub/player/${username}/games/${prevYear}/${prevMonth}`;
-      archivesToCheck.push({url: prevArchiveUrl, key: prevYearMonth, isCurrent: false});
-      ss.toast('Finalizing previous month...', '⏳', -1);
+      // If Games sheet already contains any row from the previous month, consider it finalized
+      if (isMonthPresentInGamesSheet(prevYear, parseInt(prevMonth, 10))) {
+        props.setProperty('LAST_FINALIZED_MONTH', prevYearMonth);
+      } else {
+        const prevArchiveUrl = `https://api.chess.com/pub/player/${username}/games/${prevYear}/${prevMonth}`;
+        archivesToCheck.push({url: prevArchiveUrl, key: prevYearMonth, isCurrent: false});
+        ss.toast('Finalizing previous month...', '⏳', -1);
+      }
     }
     
     // Always check current month
@@ -552,23 +860,32 @@ function fetchChesscomGames() {
         props.setProperty('LAST_FINALIZED_MONTH', archive.key);
       }
       
-      const gamesData = response.data.games;
+      const gamesData = (response.data && response.data.games) ? response.data.games : [];
       
       if (lastKnownGameUrl) {
-        // Iterate from end to start (newest to oldest)
-        for (let i = gamesData.length - 1; i >= 0; i--) {
+        // Add only games strictly newer than lastKnownGameUrl
+        let encounteredLast = false;
+        for (let i = 0; i < gamesData.length; i++) {
           const game = gamesData[i];
-          
           if (game.url === lastKnownGameUrl) {
+            encounteredLast = true;
             foundLastKnownGame = true;
             break;
           }
-          
-          allGames.unshift(game); // Add to front to maintain order
         }
-        
-        if (foundLastKnownGame) break;
+        if (!encounteredLast) {
+          // Whole archive is newer; append all
+          allGames.push(...gamesData);
+        } else {
+          // Collect only newer ones (after lastKnown)
+          for (let i = gamesData.length - 1; i >= 0; i--) {
+            const game = gamesData[i];
+            if (game.url === lastKnownGameUrl) break;
+            allGames.unshift(game);
+          }
+        }
       } else {
+        // No last known; but to avoid refetching entire previous month, rely on ETag check + duplicate filter.
         allGames.push(...gamesData);
       }
     }
@@ -579,17 +896,24 @@ function fetchChesscomGames() {
     }
     
     // Filter out duplicates before processing
+    // Also skip any game older than or equal to last known by end_time if URL unknown
     const existingGameIds = new Set();
-    if (gamesSheet.getLastRow() > 1) {
-      const existingData = gamesSheet.getDataRange().getValues();
+    let lastKnownEndTime = 0;
+    if (derivedSheet.getLastRow() > 1) {
+      const existingData = derivedSheet.getDataRange().getValues();
       for (let i = 1; i < existingData.length; i++) {
-        existingGameIds.add(existingData[i][11]); // Game ID column (index 11)
+        const gid = existingData[i][0]; // Game ID
+        const endEpoch = existingData[i][2]; // End (epoch s)
+        if (gid) existingGameIds.add(gid);
+        if (typeof endEpoch === 'number' && endEpoch > lastKnownEndTime) lastKnownEndTime = endEpoch;
       }
     }
-    
+
     const newGames = allGames.filter(game => {
       const gameId = game.url.split('/').pop();
-      return !existingGameIds.has(gameId);
+      if (existingGameIds.has(gameId)) return false;
+      if (lastKnownEndTime && game.end_time && game.end_time <= lastKnownEndTime) return false;
+      return true;
     });
     
     if (newGames.length === 0) {
@@ -598,13 +922,11 @@ function fetchChesscomGames() {
     }
     
     ss.toast(`Found ${newGames.length} new games. Processing...`, '⏳', -1);
-    const rows = processGamesData(newGames, username);
+    const processedCount = processGamesData(newGames, username);
     
-    if (rows.length > 0) {
-      const lastRow = gamesSheet.getLastRow();
-      gamesSheet.getRange(lastRow + 1, 1, rows.length, rows[0].length).setValues(rows);
+    if (processedCount > 0) {
       
-      // Find the most recent game from the new games fetched
+      // Update last known game URL to the newest by end_time among all new and existing
       let mostRecentGame = newGames[0];
       for (const game of newGames) {
         if (game.end_time > mostRecentGame.end_time) {
@@ -613,13 +935,13 @@ function fetchChesscomGames() {
       }
       props.setProperty('LAST_GAME_URL', mostRecentGame.url);
       
-      ss.toast(`✅ Added ${rows.length} new games!`, '✅', 5);
+      ss.toast(`✅ Added ${newGames.length} new games!`, '✅', 5);
       
       // Process auto-analysis and callback data for new games
       const gamesToProcess = newGames.map(g => {
         const gameId = g.url.split('/').pop();
         return {
-          row: findGameRow(gameId),
+          row: -1, // legacy Games sheet row no longer used
           gameId: gameId,
           gameUrl: g.url,
           white: g.white?.username || '',
@@ -628,7 +950,7 @@ function fetchChesscomGames() {
           outcome: getGameOutcome(g, CONFIG.USERNAME),
           pgn: g.pgn || ''
         };
-      }).filter(g => g.row > 0 && g.gameId && g.white && g.black);
+      }).filter(g => g.gameId && g.white && g.black);
       
       processNewGamesAutoFeatures(gamesToProcess);
       
@@ -717,37 +1039,13 @@ function processGamesData(games, username) {
   const rows = [];
   const derivedRows = [];
   
-  // Sort games by timestamp (oldest first) to ensure Last Rating fills correctly
+  // Sort games by timestamp (oldest first)
   const sortedGames = games.slice().sort((a, b) => a.end_time - b.end_time);
   
   // Pre-load existing games data once for performance
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
-  const derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
   let existingGames = [];
-  
-  if (gamesSheet && gamesSheet.getLastRow() > 1) {
-    const data = gamesSheet.getDataRange().getValues();
-    // Build lookup map: format -> array of {timestamp, rating}
-    for (let i = 1; i < data.length; i++) {
-      try {
-        const format = data[i][7]; // Format column (index 7)
-        const endDate = data[i][1]; // End Date column
-        const endTime = data[i][2]; // End Time column
-        const myRating = data[i][8]; // My Rating column (index 8)
-        const timestamp = new Date(endDate + ' ' + endTime).getTime() / 1000;
-        
-        existingGames.push({
-          format: format,
-          timestamp: timestamp,
-          rating: myRating
-        });
-      } catch (error) {
-        // Skip malformed rows
-        continue;
-      }
-    }
-  }
   
   for (const game of sortedGames) {
     try {
@@ -757,9 +1055,11 @@ function processGamesData(games, username) {
       }
       
       const endDate = new Date(game.end_time * 1000);
+      const startDate = extractStartFromPGN(game.pgn) || null;
       const gameId = game.url.split('/').pop();
       const eco = extractECOFromPGN(game.pgn);
       const ecoUrl = extractECOUrlFromPGN(game.pgn);
+      const ecoSlug = extractECOSlug(ecoUrl);
       const outcome = getGameOutcome(game, username);
       const termination = getGameTermination(game, username);
       const format = getGameFormat(game);
@@ -773,85 +1073,88 @@ function processGamesData(games, username) {
       const myRating = isWhite ? game.white?.rating : game.black?.rating;
       const oppRating = isWhite ? game.black?.rating : game.white?.rating;
       
-      // Calculate Last Rating from pre-loaded data AND games processed in this batch
+      // Last Rating deprecated in combined sheet; keep legacy computation only for Games rows if needed
       let lastRating = null;
-      let lastGameTime = 0;
-      
-      // Check existing games from sheet
-      for (const existingGame of existingGames) {
-        if (existingGame.format === format && 
-            existingGame.timestamp < game.end_time && 
-            existingGame.timestamp > lastGameTime) {
-          lastGameTime = existingGame.timestamp;
-          lastRating = existingGame.rating;
-        }
-      }
       
       // Parse time control
       const tcParsed = parseTimeControl(game.time_control, game.time_class);
       
-      // Extract moves with clocks and times
+      // Extract compact move data
+      const tcn = game.tcn || extractTCNFromPGN(game.pgn) || '';
       const moveData = extractMovesWithClocks(game.pgn, tcParsed.baseTime, tcParsed.increment);
+      const mc36 = encodeClocksBase36(moveData.clocks);
       
-      // Create proper date/time objects
-      // End Date: Set to midnight of the game's date (no time component)
-      const endDateObj = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
-      
-      // End Time: Create a date with just time component (use epoch date + time)
-      const endTimeObj = new Date(1970, 0, 1, endDate.getHours(), endDate.getMinutes(), endDate.getSeconds());
-      
-      // Combined End DateTime for derived sheet
+      // Combined Start/End datetimes
       const endDateTime = new Date(endDate.getTime());
+      const startDateTime = startDate ? new Date(startDate.getTime()) : (duration && duration > 0 ? new Date(endDateTime.getTime() - (duration * 1000)) : null);
       
-      // Calculate start time from duration
-      let startDateTime = null;
-      let startDateObj = null;
-      let startTimeObj = null;
-      
-      if (duration && duration > 0) {
-        startDateTime = new Date(endDateTime.getTime() - (duration * 1000));
-        startDateObj = new Date(startDateTime.getFullYear(), startDateTime.getMonth(), startDateTime.getDate());
-        startTimeObj = new Date(1970, 0, 1, startDateTime.getHours(), startDateTime.getMinutes(), startDateTime.getSeconds());
-      }
-      
-      rows.push([
-        game.url, endDateObj, endTimeObj, myColor, opponent || 'Unknown',
-        outcome, termination, format,
-        myRating || 'N/A', oppRating || 'N/A', lastRating || 'N/A',
-        gameId, false, false
-      ]);
+      // No longer writing legacy Games rows; combined output only
       
       // Calculate Moves (ply count / 2 rounded up)
       const movesCount = moveData.plyCount > 0 ? Math.ceil(moveData.plyCount / 2) : 0;
       
-      // Store derived data in hidden sheet
+      // Compute Rating Before/Delta (fast, format-local)
+      // Use last seen rating for this format from prior writes in this batch, else from a small cache from existing sheet
+      if (!processGamesData._formatLast) processGamesData._formatLast = new Map();
+      const key = mapFormatToShort(format);
+      const last = processGamesData._formatLast.get(key);
+      const ratingBefore = (typeof last === 'number') ? last : null;
+      const deltaQuick = (ratingBefore != null && typeof myRating === 'number') ? (myRating - ratingBefore) : null;
+
+      // Update cache with this game's rating for subsequent rows
+      if (typeof myRating === 'number') processGamesData._formatLast.set(key, myRating);
+
+      // Store combined lean data in derived sheet
+      const dbValues = getOpeningOutputs(ecoSlug);
+      const startLocalEpoch = startDateTime ? Math.floor(new Date(startDateTime.getFullYear(), startDateTime.getMonth(), startDateTime.getDate(), startDateTime.getHours(), startDateTime.getMinutes(), startDateTime.getSeconds()).getTime() / 1000) : null;
+      const endLocalEpoch = Math.floor(new Date(endDateTime.getFullYear(), endDateTime.getMonth(), endDateTime.getDate(), endDateTime.getHours(), endDateTime.getMinutes(), endDateTime.getSeconds()).getTime() / 1000);
+      const endLocalSerial = (() => {
+        // Google Sheets serial date: days since 1899-12-30 (accounts for 1900 leap bug)
+        const msPerDay = 24 * 60 * 60 * 1000;
+        const epoch = new Date(Date.UTC(1899, 11, 30));
+        const localDate = new Date(endDateTime.getFullYear(), endDateTime.getMonth(), endDateTime.getDate());
+        return Math.floor((localDate.getTime() - epoch.getTime()) / msPerDay);
+      })();
+      const endLocalTime = (() => {
+        // Seconds since local midnight
+        const d = new Date(endDateTime);
+        return d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
+      })();
+
+      // Archive tag (MM/YY) from end UTC
+      const archiveTag = (() => {
+        const d = new Date(endDateTime);
+        return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getFullYear()).slice(-2)}`;
+      })();
+
       derivedRows.push([
-  gameId,
-  game.white?.username || 'Unknown',
-  game.black?.username || 'Unknown',
-  game.white?.rating || 'N/A',
-  game.black?.rating || 'N/A',
-  timeClass,
-  game.time_control || '',
-  tcParsed.type,
-  tcParsed.baseTime,
-  tcParsed.increment,
-  tcParsed.correspondenceTime,
-  eco,
-  ecoUrl,
-  extractECOSlug(ecoUrl), // NEW: ECO Slug column
-  game.rated !== undefined ? game.rated : true,
-  endDateTime,
-  startDateTime,
-  startDateObj,
-  startTimeObj,
-  duration,
-  moveData.plyCount,
-  movesCount,
-  moveData.moveList,
-  moveData.clocks,
-  moveData.times
-]);
+        gameId,
+        startLocalEpoch,
+        endLocalEpoch,
+        endLocalSerial,
+        endLocalTime,
+        archiveTag,
+        timeClass.toLowerCase() !== 'daily',
+        timeClass,
+        mapFormatToShort(format),
+        tcParsed.baseTime,
+        tcParsed.increment,
+        tcParsed.correspondenceTime,
+        isWhite,
+        opponent || 'Unknown',
+        myRating || 'N/A',
+        oppRating || 'N/A',
+        ratingBefore,
+        deltaQuick,
+        outcome,
+        termination,
+        eco,
+        dbValues[0], // Opening Name
+        dbValues[1], // Opening Family
+        moveData.plyCount,
+        tcn,
+        mc36
+      ]);
       
       // Add this game to existingGames for subsequent games in this batch
       existingGames.push({
@@ -866,14 +1169,27 @@ function processGamesData(games, username) {
     }
   }
   
-  // Write derived data to hidden sheet
+  // Write combined data to Derived sheet
   if (derivedSheet && derivedRows.length > 0) {
     const lastRow = derivedSheet.getLastRow();
     derivedSheet.getRange(lastRow + 1, 1, derivedRows.length, derivedRows[0].length).setValues(derivedRows);
+    // Seed/refresh format-last cache from newly written rows to support subsequent fetches efficiently
+    const wrote = derivedSheet.getRange(lastRow + 1, 1, derivedRows.length, derivedRows[0].length).getValues();
+    if (!processGamesData._formatLast) processGamesData._formatLast = new Map();
+    for (const r of wrote) {
+      const formatVal = r[8]; // Format short at col 9 (1-based)
+      const myRatingVal = r[14]; // My Rating at col 15 (1-based)
+      if (typeof myRatingVal === 'number') {
+        processGamesData._formatLast.set(formatVal, myRatingVal);
+      }
+    }
   }
   
-  return rows;
+  // Return count processed
+  return derivedRows.length;
 }
+
+function ensureDerivedDbColumns(_derivedSheet) { /* no-op: using minimal opening outputs inline */ }
 
 // Get game format based on rules and time control
 function getGameFormat(game) {
@@ -893,52 +1209,7 @@ function getGameFormat(game) {
 
 // Remove duplicate games based on Game ID
 function removeDuplicates() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const gamesSheet = ss.getSheetByName(SHEETS.GAMES);
-  
-  if (!gamesSheet) {
-    SpreadsheetApp.getUi().alert('❌ Games sheet not found!');
-    return;
-  }
-  
-  const data = gamesSheet.getDataRange().getValues();
-  const header = data[0];
-  const gameIdCol = 11; // Game ID column (index 11)
-  
-  const seen = new Set();
-  const rowsToKeep = [header];
-  let duplicateCount = 0;
-  
-  for (let i = 1; i < data.length; i++) {
-    const gameId = data[i][gameIdCol];
-    
-    if (!seen.has(gameId)) {
-      seen.add(gameId);
-      rowsToKeep.push(data[i]);
-    } else {
-      duplicateCount++;
-    }
-  }
-  
-  if (duplicateCount > 0) {
-    gamesSheet.clear();
-    gamesSheet.getRange(1, 1, rowsToKeep.length, rowsToKeep[0].length).setValues(rowsToKeep);
-    
-    gamesSheet.getRange(1, 1, 1, header.length)
-      .setFontWeight('bold')
-      .setBackground('#4285f4')
-      .setFontColor('#ffffff');
-    gamesSheet.setFrozenRows(1);
-    
-    SpreadsheetApp.getActiveSpreadsheet().toast(
-      `Removed ${duplicateCount} duplicate(s)`, 
-      '🗑️', 
-      3
-    );
-    Logger.log(`Removed ${duplicateCount} duplicates`);
-  } else {
-    SpreadsheetApp.getActiveSpreadsheet().toast('No duplicates found!', 'ℹ️', 2);
-  }
+  // No-op: legacy Games sheet duplicate removal removed
 }
 
 // ============================================
@@ -1042,6 +1313,132 @@ function extractECOSlug(ecoUrl) {
   return protected;
 }
 
+// ================================
+// OPENINGS DB LOOKUP (by ECO Slug)
+// ================================
+
+function loadOpeningsDbCache() {
+  if (OPENINGS_DB_CACHE) return OPENINGS_DB_CACHE;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const dbSheet = ss.getSheetByName(SHEETS.OPENINGS_DB);
+  const cache = new Map();
+  if (!dbSheet) {
+    OPENINGS_DB_CACHE = cache;
+    return cache;
+  }
+  const values = dbSheet.getDataRange().getValues();
+  if (!values || values.length < 2) {
+    OPENINGS_DB_CACHE = cache;
+    return cache;
+  }
+  const header = values[0];
+  const slugIdx = header.indexOf('Trim Slug');
+  const familyIdx = header.indexOf('Family');
+  // The TSV has two 'Name' headers. We'll treat the first as Full Name and the second as Base Name.
+  // Positions per OPENINGS_DB_HEADERS:
+  // 0: Name (Full), 1: Trim Slug, 2: Family, 3: Name (Base), 4..9: Variation 1..6
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    const trimSlug = String(row[1] || '').trim();
+    if (!trimSlug) continue;
+    const fullName = String(row[0] || '');
+    const baseName = String(row[3] || '');
+    const family = String(row[2] || '');
+    const v1 = String(row[4] || '');
+    const v2 = String(row[5] || '');
+    const v3 = String(row[6] || '');
+    const v4 = String(row[7] || '');
+    const v5 = String(row[8] || '');
+    const v6 = String(row[9] || '');
+    cache.set(trimSlug, [fullName, family, baseName, v1, v2, v3, v4, v5, v6]);
+  }
+  OPENINGS_DB_CACHE = cache;
+  return cache;
+}
+
+function normalizeSlugForDb(ecoSlug) {
+  if (!ecoSlug) return '';
+  // The DB uses Title-Case with hyphens; ecoSlug looks similar but may include lowercase and numbers like with-3-Nc3
+  // We'll convert to Title-Case tokens separated by '-' and ensure castling tokens are normalized.
+  const tokens = ecoSlug
+    .replace(/_/g, '-')
+    .split('-')
+    .filter(Boolean)
+    .map(tok => {
+      if (/^with$/i.test(tok) || /^and$/i.test(tok)) return tok.charAt(0).toUpperCase() + tok.slice(1).toLowerCase();
+      if (/^o$/i.test(tok)) return 'O';
+      if (/^o\so$/i.test(tok)) return 'O-O';
+      // Preserve chess move tokens/case like Nf3, e4, O-O, but capitalize words
+      if (/^[a-z][a-z]+$/i.test(tok)) {
+        return tok.charAt(0).toUpperCase() + tok.slice(1);
+      }
+      return tok;
+    });
+  return tokens.join('-');
+}
+
+function getDbMappingValues(ecoSlug) {
+  // Returns array matching DERIVED_DB_HEADERS order
+  const empty = ['', '', '', '', '', '', '', '', ''];
+  if (!ecoSlug) return empty;
+  const db = loadOpeningsDbCache();
+  // Try direct match first
+  if (db.has(ecoSlug)) return db.get(ecoSlug);
+  // Try normalized form
+  const normalized = normalizeSlugForDb(ecoSlug);
+  if (db.has(normalized)) return db.get(normalized);
+  // Try loosening: drop trailing move qualifiers like 'with-3-Nc3' if not found
+  const withoutWith = ecoSlug.split('-with-')[0];
+  if (withoutWith && db.has(withoutWith)) return db.get(withoutWith);
+  const normalizedWithoutWith = normalized.split('-with-')[0];
+  if (normalizedWithoutWith && db.has(normalizedWithoutWith)) return db.get(normalizedWithoutWith);
+  return empty;
+}
+
+// Minimal opening outputs: [Opening Name, Opening Family]
+function getOpeningOutputs(ecoSlug) {
+  const db = loadOpeningsDbCache();
+  if (!ecoSlug) return ['', ''];
+  const keys = [ecoSlug, normalizeSlugForDb(ecoSlug), ecoSlug.split('-with-')[0] || '', normalizeSlugForDb(ecoSlug).split('-with-')[0] || ''];
+  for (const k of keys) {
+    if (k && db.has(k)) {
+      const row = db.get(k);
+      return [row[0] || '', row[2] || '']; // Full Name, Family
+    }
+  }
+  return ['', ''];
+}
+
+// Extract start datetime from PGN headers if available
+function extractStartFromPGN(pgn) {
+  if (!pgn) return null;
+  const dateMatch = pgn.match(/\[UTCDate "([^"]+)"\]/);
+  const timeMatch = pgn.match(/\[UTCTime "([^"]+)"\]/);
+  if (!dateMatch || !timeMatch) return null;
+  try {
+    const d = dateMatch[1].split('.');
+    const t = timeMatch[1].split(':');
+    return new Date(Date.UTC(parseInt(d[0]), parseInt(d[1]) - 1, parseInt(d[2]), parseInt(t[0]), parseInt(t[1]), parseInt(t[2])));
+  } catch (e) {
+    return null;
+  }
+}
+
+// Try to extract a TCN-like move list from PGN (fallback)
+function extractTCNFromPGN(_pgn) { return ''; }
+
+// Encode clocks (seconds) to base36 deciseconds dot-joined
+function encodeClocksBase36(clocksCsv) {
+  if (!clocksCsv) return '';
+  const parts = String(clocksCsv).split(',').map(s => s.trim()).filter(Boolean);
+  if (parts.length === 0) return '';
+  return parts.map(p => {
+    const ds = Math.round(parseFloat(p) * 10);
+    const val = isFinite(ds) && ds >= 0 ? ds : 0;
+    return val.toString(36);
+  }).join('.');
+}
+
 // Extract moves with clock times from PGN
 function extractMovesWithClocks(pgn, baseTime, increment) {
   if (!pgn) return { moves: [], clocks: [], times: [] };
@@ -1077,9 +1474,8 @@ function extractMovesWithClocks(pgn, baseTime, increment) {
     
     // Time spent = previous clock - current clock + increment
     let timeSpent = prevPlayerClock - clockSeconds + (increment || 0);
-    
-    // Minimum move time is 0.1 seconds (Chess.com enforces this)
-    if (timeSpent < 0.1) timeSpent = 0.1;
+    // Allow 0.0 seconds moves (e.g., premove)
+    if (timeSpent < 0) timeSpent = 0;
     
     times.push(Math.round(timeSpent * 10) / 10); // Round to 1 decimal
     
@@ -1185,7 +1581,7 @@ function setupSheets() {
     const headers = [
       'Game URL', 'End Date', 'End Time', 'My Color', 'Opponent',
       'Outcome', 'Termination', 'Format',
-      'My Rating', 'Opp Rating', 'Last Rating',
+      'My Rating', 'Opp Rating',
       'Game ID', 'Analyzed', 'Callback Fetched'
     ];
     gamesSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -1201,55 +1597,48 @@ function setupSheets() {
     gamesSheet.getRange('C:C').setNumberFormat('h:mm AM/PM');
   }
   
-  let derivedSheet = ss.getSheetByName(SHEETS.DERIVED);
-  if (!derivedSheet) {
-    derivedSheet = ss.insertSheet(SHEETS.DERIVED);
-    const headers = [
-      'Game ID', 'White Username', 'Black Username', 'White Rating', 'Black Rating',
-      'Time Class', 'Time Control', 'Type', 'Base Time', 'Increment', 'Correspondence Time',
-      'ECO', 'ECO URL', 'ECO Slug', 'Rated',
-      'End', 'Start', 'Start Date', 'Start Time', 'Duration (s)', 'Ply Count', 'Moves',
-      'Move List', 'Move Clocks', 'Move Times'
-    ];
-    derivedSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-    derivedSheet.getRange(1, 1, 1, headers.length)
+  const gamesHeaders = [
+    // Combined lean schema (local time standard)
+    'Game ID',
+    'Start', 'End', 'Date', 'Time', 'Archive (MM/YY)',
+    'Is Live', 'Time Class', 'Format', 'Base Time (s)', 'Increment (s)', 'Correspondence Time (s)',
+    'Is White', 'Opponent', 'My Rating', 'Opp Rating', 'Rating Before', 'Delta',
+    'Outcome', 'Termination',
+    'ECO', 'Opening Name', 'Opening Family',
+    'Ply Count',
+    // Compact detail
+    'tcn', 'clocks'
+  ];
+
+  let gamesSheetRef = ss.getSheetByName(SHEETS.GAMES);
+  if (!gamesSheetRef) {
+    gamesSheetRef = ss.insertSheet(SHEETS.GAMES);
+  }
+  // Always reset the header row to canonical headers
+  gamesSheetRef.getRange(1, 1, 1, gamesHeaders.length).setValues([gamesHeaders]);
+  gamesSheetRef.getRange(1, 1, 1, gamesHeaders.length)
+    .setFontWeight('bold')
+    .setBackground('#666666')
+    .setFontColor('#ffffff');
+  gamesSheetRef.setFrozenRows(1);
+
+  // Ensure Daily Stats sheet exists
+  let stats = ss.getSheetByName('Daily Stats');
+  if (!stats) {
+    stats = ss.insertSheet('Daily Stats');
+    const statHeaders = buildDailyStatsHeaders();
+    stats.getRange(1, 1, 1, statHeaders.length).setValues([statHeaders]);
+    stats.getRange(1, 1, 1, statHeaders.length)
       .setFontWeight('bold')
-      .setBackground('#666666')
+      .setBackground('#2b7de9')
       .setFontColor('#ffffff');
-    derivedSheet.setFrozenRows(1);
-    
-    // Format date/time columns
-    derivedSheet.getRange('P:P').setNumberFormat('m"/"d"/"yy h:mm AM/PM'); // End
-    derivedSheet.getRange('Q:Q').setNumberFormat('m"/"d"/"yy h:mm AM/PM'); // Start
-    derivedSheet.getRange('R:R').setNumberFormat('m"/"d"/"yy'); // Start Date
-    derivedSheet.getRange('S:S').setNumberFormat('h:mm AM/PM'); // Start Time
-    
-    // Format Move Clocks and Move Times columns as text
-    derivedSheet.getRange('W:W').setNumberFormat('@STRING@'); // Move List
-    derivedSheet.getRange('X:X').setNumberFormat('@STRING@'); // Move Clocks
-    derivedSheet.getRange('Y:Y').setNumberFormat('@STRING@'); // Move Times
-    
-    // Hide the derived sheet
-    derivedSheet.hideSheet();
-  } else {
-    // If sheet exists, add ECO Slug column if not present
-    const headers = derivedSheet.getRange(1, 1, 1, derivedSheet.getLastColumn()).getValues()[0];
-    if (!headers.includes('ECO Slug')) {
-      // Insert new column after ECO URL (column 13)
-      derivedSheet.insertColumnAfter(13);
-      derivedSheet.getRange(1, 14).setValue('ECO Slug')
-        .setFontWeight('bold')
-        .setBackground('#666666')
-        .setFontColor('#ffffff');
-    }
+    stats.setFrozenRows(1);
+    // Hide heavy columns by default (AvgOpp, Perf) and group blocks
+    groupAndFormatDailyStats(stats, statHeaders);
   }
 
   
-  // Apply formatting to existing Games sheet if it exists
-  if (gamesSheet) {
-    gamesSheet.getRange('B:B').setNumberFormat('m"/"d"/"yy');
-    gamesSheet.getRange('C:C').setNumberFormat('h:mm AM/PM');
-  }
+  // No legacy Games formatting needed
   
    let callbackSheet = ss.getSheetByName(SHEETS.CALLBACK);
   if (!callbackSheet) {
@@ -1274,9 +1663,98 @@ function setupSheets() {
     
     callbackSheet.getRange('K:K').setNumberFormat('@STRING@');
   }
+
+  // No archive sheet
+
+  // Ensure Openings DB sheet exists with headers for paste/import
+  let dbSheet = ss.getSheetByName(SHEETS.OPENINGS_DB);
+  if (!dbSheet) {
+    dbSheet = ss.insertSheet(SHEETS.OPENINGS_DB);
+    dbSheet.getRange(1, 1, 1, OPENINGS_DB_HEADERS.length).setValues([OPENINGS_DB_HEADERS]);
+    dbSheet.getRange(1, 1, 1, OPENINGS_DB_HEADERS.length)
+      .setFontWeight('bold')
+      .setBackground('#0b8043')
+      .setFontColor('#ffffff');
+    dbSheet.setFrozenRows(1);
+  }
   
   SpreadsheetApp.getUi().alert('✅ Sheets setup complete!');
 }
 
 
 
+
+// ============================================
+// UTILITIES: Refresh mappings across existing rows
+// ============================================
+function refreshDerivedDbMappings() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const derivedSheet = ss.getSheetByName(SHEETS.GAMES);
+  if (!derivedSheet) {
+    SpreadsheetApp.getUi().alert('Games sheet not found');
+    return;
+  }
+  // Ensure cache is loaded fresh
+  OPENINGS_DB_CACHE = null;
+  loadOpeningsDbCache();
+
+  const lastRow = derivedSheet.getLastRow();
+  const lastCol = derivedSheet.getLastColumn();
+  if (lastRow < 2) return;
+
+  const headers = derivedSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  const ecoCol = headers.indexOf('ECO') + 1;
+  if (ecoCol <= 0) {
+    SpreadsheetApp.getUi().alert('ECO column not found');
+    return;
+  }
+
+  // Ensure minimal opening columns exist: Opening Name, Opening Family
+  let openingNameCol = headers.indexOf('Opening Name') + 1;
+  let openingFamilyCol = headers.indexOf('Opening Family') + 1;
+  if (openingNameCol <= 0) {
+    derivedSheet.insertColumnAfter(ecoCol);
+    openingNameCol = ecoCol + 1;
+    derivedSheet.getRange(1, openingNameCol).setValue('Opening Name')
+      .setFontWeight('bold').setBackground('#666666').setFontColor('#ffffff');
+  }
+  if (openingFamilyCol <= 0) {
+    derivedSheet.insertColumnAfter(openingNameCol);
+    openingFamilyCol = openingNameCol + 1;
+    derivedSheet.getRange(1, openingFamilyCol).setValue('Opening Family')
+      .setFontWeight('bold').setBackground('#666666').setFontColor('#ffffff');
+  }
+
+  const ecoSlugs = derivedSheet.getRange(2, ecoCol, lastRow - 1, 1).getValues().map(r => String(r[0] || ''));
+  const names = [];
+  const fams = [];
+  for (const ecoSlug of ecoSlugs) {
+    const [name, fam] = getOpeningOutputs(ecoSlug);
+    names.push([name]);
+    fams.push([fam]);
+  }
+  derivedSheet.getRange(2, openingNameCol, names.length, 1).setValues(names);
+  derivedSheet.getRange(2, openingFamilyCol, fams.length, 1).setValues(fams);
+  SpreadsheetApp.getUi().alert('✅ Opening mappings refreshed');
+}
+
+// ============================================
+// ENRICHMENT: Reconstruct Move Times for selection
+// ============================================
+// enrichMoveTimesForSelection removed: clocks are already stored; times can be derived on demand
+
+
+// Helpers for base-36 sequences in deciseconds
+function decodeBase36Seq(s) { return String(s).split('.').filter(Boolean).map(t => { const v = parseInt(t, 36); return isFinite(v) && v >= 0 ? v : 0; }); }
+function encodeBase36Seq(arr) { return (arr || []).map(v => (v >= 0 ? v : 0).toString(36)).join('.'); }
+function reconstructTimesFromClocksDeci(baseDeci, incDeci, clocksDeci) {
+  const times = [];
+  let prev = [baseDeci || 0, baseDeci || 0];
+  for (let i = 0; i < clocksDeci.length; i++) {
+    const p = i % 2;
+    const t = (prev[p] - (clocksDeci[i] || 0) + (incDeci || 0));
+    times.push(t >= 0 ? t : 0);
+    prev[p] = clocksDeci[i] || 0;
+  }
+  return times;
+}
